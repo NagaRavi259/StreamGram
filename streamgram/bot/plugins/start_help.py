@@ -61,9 +61,10 @@ async def check_user(b: Client, m: MessageHandler):
     """
     if Var.USER_GROUP_ID:
         user_id = m.from_user.id
-        is_member = await is_user_in_group(b, Var.USER_GROUP_ID, user_id)
-        if (user_id in Var.TRUSTED_USERS) or is_member:
+        if user_id in Var.TRUSTED_USERS:
             # By doing nothing here, we allow the message to pass to the next handlers.
+            return
+        elif await is_user_in_group(b, Var.USER_GROUP_ID, user_id):
             return
         else:
             # 1. Send a message to the user
