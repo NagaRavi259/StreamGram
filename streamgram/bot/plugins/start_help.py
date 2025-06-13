@@ -5,10 +5,11 @@ import logging
 logger = logging.getLogger(__name__)
 from streamgram.bot.plugins.stream import MY_PASS
 from streamgram.utils.human_readable import humanbytes
-from streamgram.utils.database import Database
-from pyrogram import filters
+from streamgram.utils.database import Database, get_mongo_uri
+from pyrogram import Client, filters, StopPropagation
+from pyrogram.handlers import MessageHandler
 from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton
-from pyrogram.errors import UserNotParticipant
+from pyrogram.errors import UserNotParticipant, PeerIdInvalid
 from streamgram.utils.file_properties import get_name, get_hash, get_media_file_size
 from pyrogram.types import ReplyKeyboardMarkup
 import asyncio
@@ -16,7 +17,8 @@ import sys
 
 try:
     loop = asyncio.get_event_loop()
-    db = Database(Var.DATABASE_URL, Var.name)
+    database_url = get_mongo_uri()
+    db = Database(database_url, Var.name)
     if loop.is_running():
         # If the event loop is already running, schedule the task in it
         task = loop.create_task(db.initialize())
@@ -28,6 +30,53 @@ except Exception as e:
     logging.critical(f"Critical error occurred during database initialization: {e}")
     sys.exit(1)  # Force exit the program if database initialization fails
 
+
+# ----------------- MIDDLEWARE HANDLER (Corrected) ----------------- #
+
+async def is_user_in_group(client, chat_id, user_id):
+    """
+    Checks if a user is a member of a group.
+    Returns True if they are, False otherwise (for any reason).
+    """
+    try:
+        # The core check. If this succeeds, the user is in the group.
+        await client.get_chat_member(chat_id=chat_id, user_id=user_id)
+        return True
+    except UserNotParticipant:
+        # This is a valid, expected outcome: the user is known but not in the group.
+        return False
+    except PeerIdInvalid:
+        # This means the USER_ID is unknown to the bot. Also means they are not a member.
+        return False
+    except Exception as e:
+        print(f"An unexpected error in is_user_in_group: {e}")
+        return False
+
+@StreamBot.on_message(filters.private, group=-1)
+async def check_user(b: Client, m: MessageHandler):
+    """
+    This middleware authorizes users.
+    It allows trusted users OR members of the required channel to proceed.
+    Others are blocked.
+    """
+    if Var.USER_GROUP_ID:
+        user_id = m.from_user.id
+        is_member = await is_user_in_group(b, Var.USER_GROUP_ID, user_id)
+        if (user_id in Var.TRUSTED_USERS) or is_member:
+            # By doing nothing here, we allow the message to pass to the next handlers.
+            return
+        else:
+            # 1. Send a message to the user
+            await m.reply_text(
+                "🔒 **Access Denied**\n\n"
+                "You are not authorized to use this bot.\n\n"
+            )
+            # 2. Stop any other handlers from running for this update
+            raise StopPropagation()
+    else:
+        return
+
+# ----------------- END OF MIDDLEWARE ----------------- #
 
 @StreamBot.on_message(filters.command('start') & filters.private)
 async def start(b, m):

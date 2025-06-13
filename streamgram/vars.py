@@ -2,6 +2,7 @@
 import os
 from os import getenv, environ
 from dotenv import load_dotenv
+from urllib.parse import quote_plus
 
 env_path = "config.env"
 
@@ -35,8 +36,19 @@ class Var(object):
         URL = "https://{}/".format(FQDN)
     else:
         URL = "http://{}/".format(FQDN)
-    WORKERS = int(getenv('WORKERS'))
+    WORKERS = int(getenv('WORKERS', 3))
     MY_PASS = str(getenv('MY_PASS'))
-    DATABASE_URL = str(getenv('DATABASE_URL'))
+
+    ## database connection detials
+    # DATABASE_URL = str(getenv('DATABASE_URL'))
+
+    MONGO_SCHEMA = getenv("MONGO_SCHEMA", "")
+    MONGO_USERNAME = quote_plus(getenv("MONGO_USERNAME", ""))
+    MONGO_PASSWORD = quote_plus(getenv("MONGO_PASSWORD", ""))  # this will encode the colon (:) and any other special characters
+    MONGO_HOST = getenv("MONGO_HOST", "127.0.0.1")
+    MONGO_PORT = getenv("MONGO_PORT", '27017')
+
     UPDATES_CHANNEL = str(getenv('UPDATES_CHANNEL', None))
     BANNED_CHANNELS = list(set(int(x) for x in str(getenv("BANNED_CHANNELS", "-1001362659779")).split()))
+    TRUSTED_USERS = set([int(user) for user in ((getenv('TRUSTED_USERS', '')).split(" "))])
+    USER_GROUP_ID = int(getenv('USER_GROUP_ID', 1))    

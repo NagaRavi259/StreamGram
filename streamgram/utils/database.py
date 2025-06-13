@@ -4,6 +4,15 @@ import motor.motor_asyncio
 import logging
 import sys
 import pymongo.errors
+from streamgram.vars import Var
+
+def get_mongo_uri() -> str:
+    """Builds and returns the MongoDB connection URI from environment variables."""
+    if Var.MONGO_SCHEMA == "mongodb+srv":
+        uri = f"{Var.MONGO_SCHEMA}://{Var.MONGO_USERNAME}:{Var.MONGO_PASSWORD}@{Var.MONGO_HOST}/?retryWrites=true&w=majority&tls=true"
+    else:
+        uri = f"{Var.MONGO_SCHEMA}://{Var.MONGO_USERNAME}:{Var.MONGO_PASSWORD}@{Var.MONGO_HOST}:{Var.MONGO_PORT}/"
+    return uri
 
 class Database:
     def __init__(self, uri, database_name):

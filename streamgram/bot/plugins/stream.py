@@ -3,7 +3,7 @@ import os
 import asyncio
 from asyncio import TimeoutError
 from streamgram.bot import StreamBot
-from streamgram.utils.database import Database
+from streamgram.utils.database import Database, get_mongo_uri
 from streamgram.utils.human_readable import humanbytes
 from streamgram.vars import Var
 from urllib.parse import quote_plus
@@ -16,7 +16,8 @@ import sys
 
 try:
     loop = asyncio.get_event_loop()
-    db = Database(Var.DATABASE_URL, Var.name)
+    dabase_url = get_mongo_uri()
+    db = Database(dabase_url, Var.name)
     if loop.is_running():
         # If the event loop is already running, schedule the task in it
         task = loop.create_task(db.initialize())
@@ -33,7 +34,8 @@ MY_PASS = os.environ.get("MY_PASS",None)
 pass_dict = {}
 try:
     loop = asyncio.get_event_loop()
-    pass_db = Database(Var.DATABASE_URL, "ag_passwords")
+    dabase_url = get_mongo_uri()
+    pass_db = Database(dabase_url, "ag_passwords")
     if loop.is_running():
         # If the event loop is already running, schedule the task in it
         task = loop.create_task(pass_db.initialize())
