@@ -84,7 +84,7 @@ async def start_services():
         asyncio.create_task(ping_server())
     print('-------------------- Initalizing Web Server -------------------------')
     # Use uvicorn to run FastAPI app
-    config = uvicorn.Config(app, host=Var.BIND_ADRESS, port=Var.PORT, log_level="debug")
+    config = uvicorn.Config(app, host=Var.BIND_ADRESS, port=Var.PORT, log_level="error")
     server = uvicorn.Server(config)
     asyncio.create_task(server.serve())
     print('----------------------------- DONE ---------------------------------------------------------------------')

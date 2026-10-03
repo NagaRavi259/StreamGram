@@ -21,6 +21,8 @@ async def get_file_ids(client: Client, chat_id: int, id: int) -> Optional[FileId
     if message.empty:
         raise FIleNotFound
     media = get_media_from_message(message)
+    if not media:
+        raise FIleNotFound
     file_unique_id = await parse_file_unique_id(message)
     file_id = await parse_file_id(message)
     setattr(file_id, "file_size", getattr(media, "file_size", 0))

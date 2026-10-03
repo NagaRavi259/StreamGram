@@ -13,6 +13,7 @@ from pyrogram.file_id import FileId, FileType, ThumbnailSource
 
 
 async def chunk_size(length):
+    length = max(length, 1)
     return 2 ** max(min(math.ceil(math.log2(length / 1024)), 10), 2) * 1024
 
 
@@ -181,52 +182,35 @@ class ByteStreamer:
     ) -> Union[str, None]:
         """
         Custom generator that yields the bytes of the media file.
+        `offset` is chunk-aligned; the first part is trimmed by `first_part_cut` and the
+        last part is trimmed to `last_part_cut` bytes, so exactly the requested range is sent.
         Modded from <https://github.com/eyaadh/megadlbot_oss/blob/master/mega/telegram/utils/custom_download.py#L20>
         Thanks to Eyaadh <https://github.com/eyaadh>
         """
         client = self.client
         work_loads[index] += 1
+        current_part = 0
         logging.debug(f"Starting to yielding file with client {index}.")
-        media_session = await self.generate_media_session(client, file_id)
-
-        current_part = 1
-
-        location = await self.get_location(file_id)
-
         try:
-            r = await media_session.send(
-                raw.functions.upload.GetFile(
-                    location=location, offset=offset, limit=chunk_size
-                ),
-            )
-            if isinstance(r, raw.types.upload.File):
-                while current_part <= part_count:
-                    chunk = r.bytes
-                    if not chunk:
-                        break
-                    offset += chunk_size
-                    if part_count == 1:
-                        yield chunk[first_part_cut:last_part_cut]
-                        break
-                    if current_part == 1:
-                        yield chunk[first_part_cut:]
-                    if 1 < current_part <= part_count:
-                        yield chunk
+            media_session = await self.generate_media_session(client, file_id)
+            location = await self.get_location(file_id)
 
-                    r = await media_session.send(
-                        raw.functions.upload.GetFile(
-                            location=location, offset=offset, limit=chunk_size
-                        ),
-                    )
-
-                    current_part += 1
-        except (TimeoutError, AttributeError):
-            pass
+            for current_part in range(1, part_count + 1):
+                r = await media_session.send(
+                    raw.functions.upload.GetFile(location=location, offset=offset, limit=chunk_size),
+                )
+                if not isinstance(r, raw.types.upload.File) or not r.bytes:
+                    break
+                start = first_part_cut if current_part == 1 else 0
+                end = last_part_cut if current_part == part_count else len(r.bytes)
+                yield r.bytes[start:end]
+                offset += chunk_size
+        except (TimeoutError, AttributeError) as e:
+            logging.warning(f"Stream interrupted at part {current_part}/{part_count}: {e!r}")
         finally:
-            logging.debug("Finished yielding file with {current_part} parts.")
+            logging.debug(f"Finished yielding file with {current_part} parts.")
             work_loads[index] -= 1
 
-    
     async def clean_cache(self) -> None:
         """
         function to clean the cache to reduce memory usage

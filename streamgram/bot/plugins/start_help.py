@@ -6,9 +6,10 @@ logger = logging.getLogger(__name__)
 from streamgram.bot.plugins.stream import MY_PASS
 from streamgram.utils.human_readable import humanbytes
 from streamgram.utils.database import Database, get_mongo_uri
-from pyrogram import Client, filters, StopPropagation
+from streamgram.utils.access import has_access, access_db, is_exempt
+from pyrogram import Client, filters, StopPropagation, enums
 from pyrogram.handlers import MessageHandler
-from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton, Message
 from pyrogram.errors import UserNotParticipant, PeerIdInvalid
 from streamgram.utils.file_properties import get_name, get_hash, get_media_file_size
 from pyrogram.types import ReplyKeyboardMarkup
@@ -33,49 +34,40 @@ except Exception as e:
 
 # ----------------- MIDDLEWARE HANDLER (Corrected) ----------------- #
 
-async def is_user_in_group(client, chat_id, user_id):
-    """
-    Checks if a user is a member of a group.
-    Returns True if they are, False otherwise (for any reason).
-    """
-    try:
-        # The core check. If this succeeds, the user is in the group.
-        await client.get_chat_member(chat_id=chat_id, user_id=user_id)
-        return True
-    except UserNotParticipant:
-        # This is a valid, expected outcome: the user is known but not in the group.
-        return False
-    except PeerIdInvalid:
-        # This means the USER_ID is unknown to the bot. Also means they are not a member.
-        return False
-    except Exception as e:
-        print(f"An unexpected error in is_user_in_group: {e}")
-        return False
-
 @StreamBot.on_message(filters.private, group=-1)
-async def check_user(b: Client, m: MessageHandler):
+async def check_user(b: Client, m: Message):
     """
-    This middleware authorizes users.
-    It allows trusted users OR members of the required channel to proceed.
-    Others are blocked.
+    Middleware. Allowed: owners/trusted users, approved users, members of an access
+    group, and people who asked to join one (see streamgram/utils/access.py has_access).
+    Everyone else gets a 'Request Access' button; banned users are told they are banned.
     """
-    if Var.USER_GROUP_ID:
-        user_id = m.from_user.id
-        if user_id in Var.TRUSTED_USERS:
-            # By doing nothing here, we allow the message to pass to the next handlers.
-            return
-        elif await is_user_in_group(b, Var.USER_GROUP_ID, user_id):
-            return
-        else:
-            # 1. Send a message to the user
-            await m.reply_text(
-                "🔒 **Access Denied**\n\n"
-                "You are not authorized to use this bot.\n\n"
-            )
-            # 2. Stop any other handlers from running for this update
-            raise StopPropagation()
-    else:
+    if not Var.USER_GROUP_ID or m.from_user is None:
         return
+    # Invite deep link: /start inv_<token> must work for people who don't have access yet.
+    if m.text and m.text.startswith("/start inv_"):
+        from streamgram.bot.plugins.access_admin import redeem
+        ok = await redeem(b, m.from_user, m.text.split("inv_", 1)[1].strip())
+        await m.reply_text(
+            "✅ **Invite accepted.** Send me any file to get a link." if ok
+            else "❌ This invite is invalid, expired or not for you."
+        )
+        raise StopPropagation()
+    allowed, reason = await has_access(b, m.from_user.id)
+    if allowed:
+        if not is_exempt(m.from_user.id):
+            await access_db.touch(m.from_user)
+        return
+    if reason == "banned":
+        await m.reply_text("🚫 **You are banned from this bot.**")
+    elif reason == "pending":
+        await m.reply_text("⏳ **Your access request is waiting for approval.** You will be notified.")
+    else:
+        await m.reply_text(
+            "🔒 **Access Denied**\n\nYou are not authorized to use this bot.\n"
+            "Tap the button below to ask the admin for access.",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔑 Request Access", callback_data="req:access")]]),
+        )
+    raise StopPropagation()
 
 # ----------------- END OF MIDDLEWARE ----------------- #
 
