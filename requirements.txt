@@ -7,5 +7,6 @@ dnspython
 apscheduler
 requests
 psutil
-pyromod
 aiohttp
+fastapi
+uvicorn

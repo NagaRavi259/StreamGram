@@ -7,28 +7,16 @@ import asyncio
 import aiofiles
 import datetime
 from streamgram.utils.broadcast_helper import send_msg
-from streamgram.utils.database import Database, get_mongo_uri
+from streamgram.utils.database import Database
 from streamgram.bot import StreamBot
+from streamgram.utils.access import access_db
 from streamgram.vars import Var
 from pyrogram import filters, Client
 from pyrogram.types import Message
 import logging
-import sys
+logger = logging.getLogger("streamgram.bot.plugins.admin")
 
-try:
-    loop = asyncio.get_event_loop()
-    dabase_url = get_mongo_uri()
-    db = Database(dabase_url, Var.name)
-    if loop.is_running():
-        # If the event loop is already running, schedule the task in it
-        task = loop.create_task(db.initialize())
-        # Optionally, handle exceptions inside the task
-        task.add_done_callback(
-            lambda t: t.exception() and logging.critical(f"Database initialization error: {t.exception()}")
-        )
-except Exception as e:
-    logging.critical(f"Critical error occurred during database initialization: {e}")
-    sys.exit(1)  # Force exit the program if database initialization fails
+db = Database.shared(Var.name)
 
 broadcast_ids = {}
 
@@ -43,6 +31,9 @@ async def sts(c: Client, m: Message):
 @StreamBot.on_message(filters.command("broadcast") & filters.private & filters.user(list(Var.OWNER_ID)))
 async def broadcast_(c, m):
     user_id=m.from_user.id
+    if not m.reply_to_message:
+        await m.reply_text("Reply to the message you want to broadcast with /broadcast.", quote=True)
+        return
     out = await m.reply_text(
             text=f"Broadcast initiated! You will be notified with log file when all the users are notified."
     )
@@ -57,6 +48,7 @@ async def broadcast_(c, m):
     done = 0
     failed = 0
     success = 0
+    skipped = 0
     broadcast_ids[broadcast_id] = dict(
         total=total_users,
         current=done,
@@ -65,6 +57,10 @@ async def broadcast_(c, m):
     )
     async with aiofiles.open('broadcast.txt', 'w') as broadcast_log_file:
         async for user in all_users:
+            rec = await access_db.get_user(int(user['id']))
+            if rec and rec.get('status') == 'banned':
+                skipped += 1  # banned people are not sent broadcasts
+                continue
             sts, msg = await send_msg(
                 user_id=int(user['id']),
                 message=broadcast_msg
@@ -95,13 +91,13 @@ async def broadcast_(c, m):
     await out.delete()
     if failed == 0:
         await m.reply_text(
-            text=f"broadcast completed in `{completed_in}`\n\nTotal users {total_users}.\nTotal done {done}, {success} success and {failed} failed.",
+            text=f"broadcast completed in `{completed_in}`\n\nTotal users {total_users}.\nTotal done {done}, {success} success and {failed} failed ({skipped} banned skipped).",
             quote=True
         )
     else:
         await m.reply_document(
             document='broadcast.txt',
-            caption=f"broadcast completed in `{completed_in}`\n\nTotal users {total_users}.\nTotal done {done}, {success} success and {failed} failed.",
+            caption=f"broadcast completed in `{completed_in}`\n\nTotal users {total_users}.\nTotal done {done}, {success} success and {failed} failed ({skipped} banned skipped).",
             quote=True
         )
     os.remove('broadcast.txt')

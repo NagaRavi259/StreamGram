@@ -10,8 +10,8 @@ async def send_msg(user_id, message):
         await message.forward(chat_id=user_id)
         return 200, None
     except FloodWait as e:
-        await asyncio.sleep(e.x)
-        return send_msg(user_id, message)
+        await asyncio.sleep(e.value)
+        return await send_msg(user_id, message)
     except InputUserDeactivated:
         return 400, f"{user_id} : deactivated\n"
     except UserIsBlocked:

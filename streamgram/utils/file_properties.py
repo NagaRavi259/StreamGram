@@ -48,9 +48,18 @@ def get_media_from_message(message: "Message") -> Any:
             return media
 
 
+HASH_LENGTH = 12   # new links carry 12 characters of the unique id
+MIN_HASH_LENGTH = 6  # links created before the change carry only 6 and keep working
+
+
 def get_hash(media_msg: Message) -> str:
     media = get_media_from_message(media_msg)
-    return getattr(media, "file_unique_id", "")[:6]
+    return getattr(media, "file_unique_id", "")[:HASH_LENGTH]
+
+
+def hash_ok(unique_id: str, secure_hash) -> bool:
+    """A link hash is valid if it is a long enough prefix of the file's unique id."""
+    return bool(secure_hash) and len(secure_hash) >= MIN_HASH_LENGTH and unique_id.startswith(secure_hash)
 
 def get_name(media_msg: Message) -> str:
     media = get_media_from_message(media_msg)

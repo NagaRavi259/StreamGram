@@ -10,13 +10,16 @@ Mongo collections (database = Var.name):
   join_requests   people who asked to join an access group (recorded by access_admin plugin)
 """
 import time
+import asyncio
 import secrets
 import logging
+logger = logging.getLogger("streamgram.utils.access")
 import motor.motor_asyncio
+from pymongo.errors import DuplicateKeyError
 from pyrogram import enums
 from pyrogram.errors import UserNotParticipant, PeerIdInvalid
 from streamgram.vars import Var
-from streamgram.utils.database import get_mongo_uri
+from streamgram.utils.database import get_client
 
 # Rolling windows, in seconds. "life" = all time, "unlimited" = no limit.
 PERIODS = {"hour": 3600, "day": 86400, "week": 7 * 86400, "month": 30 * 86400}
@@ -65,7 +68,7 @@ def fmt_duration(seconds: int) -> str:
 
 class AccessDB:
     def __init__(self):
-        client = motor.motor_asyncio.AsyncIOMotorClient(get_mongo_uri())
+        client = get_client()
         db = client[Var.name]
         self.users = db.access_users
         self.history = db.access_history
@@ -74,9 +77,13 @@ class AccessDB:
         self.invites = db.access_invites
         self.settings = db.access_settings
         self.join_requests = db.join_requests
+        self.revoked = db.access_revoked
+        self.links = db.access_links
         self._group_cache = {"ts": 0, "ids": []}
         self._status_cache = {}
         self._touched = {}
+        self._locks = {}
+        self._revoked = {"ts": 0, "ids": set()}
         self._warned = {}
 
     async def init(self):
@@ -86,7 +93,7 @@ class AccessDB:
             await self.history.create_index([("ts", -1)])
             await self.invites.create_index("token", unique=True)
         except Exception as e:
-            logging.error(f"AccessDB index creation failed: {e}")
+            logger.error(f"AccessDB index creation failed: {e}")
 
     # ---------------- users ----------------
     async def get_user(self, uid):
@@ -138,10 +145,13 @@ class AccessDB:
         rec = await self.users.find_one({"id": user.id}, {"status": 1})
         fields = {"last_used": int(now), **profile_of(user)}
         if rec is None:
-            await self.users.insert_one(
-                {"id": user.id, "status": "group", "source": "group", "created_at": int(now),
-                 "updated_at": int(now), **fields}
-            )
+            try:
+                await self.users.insert_one(
+                    {"id": user.id, "status": "group", "source": "group", "created_at": int(now),
+                     "updated_at": int(now), **fields}
+                )
+            except DuplicateKeyError:  # another message from the same person won the race
+                await self.users.update_one({"id": user.id}, {"$set": fields})
         else:
             if rec.get("status") not in ("approved", "group", "banned"):
                 fields.update(status="group", source="group", updated_at=int(now))
@@ -192,10 +202,27 @@ class AccessDB:
             return q["period"], q["limit"]
         return await self.get_default_quota()
 
-    async def record_usage(self, uid):
-        now = int(time.time())
-        await self.usage.insert_one({"uid": int(uid), "ts": now})
-        await self.users.update_one({"id": int(uid)}, {"$set": {"last_used": now}})
+    async def reserve(self, uid):
+        """Check the limit and count one link in a single step, so several files sent at once
+        cannot all slip under it. Returns (allowed, message, token); call refund(token) if the
+        link could not be delivered."""
+        lock = self._locks.setdefault(int(uid), asyncio.Lock())
+        async with lock:
+            ok, msg = await self.check_quota(uid)
+            if not ok:
+                return False, msg, None
+            now = int(time.time())
+            res = await self.usage.insert_one({"uid": int(uid), "ts": now})
+            await self.users.update_one({"id": int(uid)}, {"$set": {"last_used": now}})
+            return True, None, res.inserted_id
+
+    async def refund(self, token):
+        if token is None:
+            return
+        try:
+            await self.usage.delete_one({"_id": token})
+        except Exception as e:
+            logger.error(f"Could not refund usage {token}: {e}")
 
     async def count_usage(self, uid, period):
         since = 0 if period == "life" else int(time.time()) - PERIODS[period]
@@ -268,13 +295,13 @@ class AccessDB:
             # Users who message the bot are always known to it, so this means the bot cannot see the chat.
             if time.time() - self._warned.get(chat_id, 0) > 600:
                 self._warned[chat_id] = time.time()
-                logging.warning(
+                logger.warning(
                     f"Bot cannot see access chat {chat_id} (Peer id invalid): add the bot to it as an admin. "
                     "Until then nobody is recognised as a member of that chat."
                 )
             return None
         except Exception as e:
-            logging.warning(f"get_chat_member({chat_id}, {uid}) failed: {e}")
+            logger.warning(f"get_chat_member({chat_id}, {uid}) failed: {e}")
             return None
         if status in MEMBER_STATUSES:
             self._status_cache[(chat_id, uid)] = (time.time(), status)
@@ -302,6 +329,26 @@ class AccessDB:
     async def remove_join_request(self, uid):
         await self.join_requests.delete_many({"id": int(uid)})
 
+    # ---------------- revoked links ----------------
+    async def set_revoked(self, msg_id, revoked=True):
+        if revoked:
+            await self.revoked.update_one({"msg_id": int(msg_id)}, {"$set": {"msg_id": int(msg_id), "ts": int(time.time())}}, upsert=True)
+        else:
+            await self.revoked.delete_one({"msg_id": int(msg_id)})
+        self._revoked["ts"] = 0
+
+    async def is_revoked(self, msg_id):
+        """True if the owner revoked links to this bin message. Cached for 30 s; keeps the old
+        answer if the database cannot be reached."""
+        if time.time() - self._revoked["ts"] > 30:
+            try:
+                ids = {d["msg_id"] async for d in self.revoked.find({}, {"msg_id": 1})}
+                self._revoked = {"ts": time.time(), "ids": ids}
+            except Exception as e:
+                logger.warning(f"Could not refresh revoked links: {e}")
+                self._revoked["ts"] = time.time() - 20
+        return int(msg_id) in self._revoked["ids"]
+
     # ---------------- invites ----------------
     async def create_invite(self, by, target_id=None):
         token = secrets.token_urlsafe(8)
@@ -327,11 +374,26 @@ class AccessDB:
 access_db = AccessDB()
 
 
+async def group_access(client, user_id):
+    """True if the person is a member of an access group or has asked to join one.
+    A ban in an access group cancels a stored join request."""
+    banned_in_group = False
+    for chat_id in await access_db.group_ids():
+        status = await access_db.chat_status(client, chat_id, user_id)
+        if status in MEMBER_STATUSES:
+            return True
+        if status == enums.ChatMemberStatus.BANNED:
+            banned_in_group = True
+    if banned_in_group:
+        await access_db.remove_join_request(user_id)
+        return False
+    return await access_db.has_join_request(user_id)
+
+
 async def has_access(client, user_id):
     """Returns (allowed, reason) where reason is 'banned' / 'pending' / 'denied' when blocked.
 
-    Order: owners/trusted -> explicit ban -> explicitly approved -> member of an access group
-    -> has asked to join an access group.
+    Order: owners/trusted -> explicit ban -> explicitly approved -> access group / join request.
     """
     if is_exempt(user_id):
         return True, None
@@ -340,16 +402,7 @@ async def has_access(client, user_id):
         return False, "banned"
     if rec and rec.get("status") == "approved":
         return True, None
-    banned_in_group = False
-    for chat_id in await access_db.group_ids():
-        status = await access_db.chat_status(client, chat_id, user_id)
-        if status in MEMBER_STATUSES:
-            return True, None
-        if status == enums.ChatMemberStatus.BANNED:
-            banned_in_group = True
-    if banned_in_group:
-        await access_db.remove_join_request(user_id)
-    elif await access_db.has_join_request(user_id):
+    if await group_access(client, user_id):
         return True, None
     return False, "pending" if rec and rec.get("status") == "pending" else "denied"
 
@@ -363,7 +416,7 @@ async def notify_owners(client, text, markup=None):
                 parse_mode=enums.ParseMode.HTML, disable_web_page_preview=True,
             )
         except Exception as e:
-            logging.warning(f"Could not notify owner {owner}: {e}")
+            logger.warning(f"Could not notify owner {owner}: {e}")
 
 
 _sponsor_cache = {}
@@ -384,6 +437,6 @@ async def channel_sponsor(client, chat_id):
                 sponsor = user.id
                 break
     except Exception as e:
-        logging.warning(f"Could not list admins of channel {chat_id}: {e}")
+        logger.warning(f"Could not list admins of channel {chat_id}: {e}")
     _sponsor_cache[chat_id] = (time.time(), sponsor)
     return sponsor

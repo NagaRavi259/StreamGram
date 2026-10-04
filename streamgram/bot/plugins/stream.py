@@ -1,53 +1,36 @@
 #(c) Adarsh-Goel
+import hashlib
 import os
+import re
 import time
 import asyncio
 from asyncio import TimeoutError
 from streamgram.bot import StreamBot
-from streamgram.utils.database import Database, get_mongo_uri
+from streamgram.utils.database import Database
 from streamgram.utils.human_readable import humanbytes
 from streamgram.vars import Var
-from streamgram.utils.access import access_db, channel_sponsor
+from streamgram.utils.access import access_db, channel_sponsor, fmt_duration
+from streamgram.utils.link_expiry import link_expiry
 from urllib.parse import quote_plus
 from pyrogram import filters, Client
 from pyrogram.errors import FloodWait, UserNotParticipant
 from pyrogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton
 from streamgram.utils.file_properties import get_name, get_hash, get_media_file_size
 import logging
-import sys
+logger = logging.getLogger("streamgram.bot.plugins.stream")
 
-try:
-    loop = asyncio.get_event_loop()
-    dabase_url = get_mongo_uri()
-    db = Database(dabase_url, Var.name)
-    if loop.is_running():
-        # If the event loop is already running, schedule the task in it
-        task = loop.create_task(db.initialize())
-        # Optionally, handle exceptions inside the task
-        task.add_done_callback(
-            lambda t: t.exception() and logging.critical(f"Database initialization error: {t.exception()}")
-        )
-except Exception as e:
-    logging.critical(f"Critical error occurred during database initialization: {e}")
-    sys.exit(1)  # Force exit the program if database initialization fails
+db = Database.shared(Var.name)
 
 
 MY_PASS = os.environ.get("MY_PASS",None)
+
+
+def pass_token(password):
+    """What is stored for a logged-in user: a hash, never the password. Changing MY_PASS logs everyone out."""
+    return hashlib.sha256(password.encode()).hexdigest()
+
 pass_dict = {}
-try:
-    loop = asyncio.get_event_loop()
-    dabase_url = get_mongo_uri()
-    pass_db = Database(dabase_url, "ag_passwords")
-    if loop.is_running():
-        # If the event loop is already running, schedule the task in it
-        task = loop.create_task(pass_db.initialize())
-        # Optionally, handle exceptions inside the task
-        task.add_done_callback(
-            lambda t: t.exception() and logging.critical(f"Database initialization error: {t.exception()}")
-        )
-except Exception as e:
-    logging.critical(f"Critical error occurred during database initialization: {e}")
-    sys.exit(1)  # Force exit the program if database initialization fails
+pass_db = Database.shared("ag_passwords")
 
 
 login_waiting = {}  # chat_id -> time until which the next text message is treated as the password
@@ -76,7 +59,7 @@ async def login_password_handler(c: Client, m: Message):
     elif time.time() > expiry:
         await m.reply_text("I can't wait more for the password, try /login again")
     elif text == MY_PASS:
-        await pass_db.add_user_pass(m.chat.id, text)
+        await pass_db.add_user_pass(m.chat.id, pass_token(text))
         await m.reply_text("yeah! you entered the password correctly")
     else:
         await m.reply_text("Wrong password, try again")
@@ -93,7 +76,7 @@ async def private_receive_handler(c: Client, m: Message):
         if check_pass== None:
             await m.reply_text("Login first using /login cmd \nDon't know the password contact @ArjunVR_AVR")
             return
-        if check_pass != MY_PASS:
+        if check_pass != pass_token(MY_PASS):
             await pass_db.delete_user(m.chat.id)
             return
     if not await db.is_user_exist(m.from_user.id):
@@ -102,7 +85,7 @@ async def private_receive_handler(c: Client, m: Message):
             Var.BIN_CHANNEL,
             f"Nᴇᴡ Usᴇʀ Jᴏɪɴᴇᴅ : \n\n Nᴀᴍᴇ : [{m.from_user.first_name}](tg://user?id={m.from_user.id}) Sᴛᴀʀᴛᴇᴅ Yᴏᴜʀ Bᴏᴛ !!"
         )
-    if Var.UPDATES_CHANNEL != "None":
+    if Var.UPDATES_CHANNEL:
         try:
             user = await c.get_chat_member(Var.UPDATES_CHANNEL, m.chat.id)
             if user.status == "kicked":
@@ -132,13 +115,19 @@ async def private_receive_handler(c: Client, m: Message):
                 text='\n🎉 Welcome to the Ultimate Test Bot! 🎉**\n\n🔹 **Enjoy All Features for FREE!**\n🔹 **No Ads, No Subscription!**\n\n**📁 How to Use:**\n\n1. **Forward a File** to this bot.\n2. **Receive a Link** to **Stream** or **Download** your file instantly!\n\n**💡 Key Features:**\n\n- **Completely Ad-Free Experience** 🚫\n- **No Subscription Required** 🎟️\n- **Fast & Easy File Sharing** 📤',
                 disable_web_page_preview=True)
             return
+    # Check the limit and count this link in one step (a burst of files cannot all slip through).
     try:
-
-        allowed, limit_msg = await access_db.check_quota(m.from_user.id)
-        if not allowed:
-            await m.reply_text(limit_msg, quote=True)
-            return
+        allowed, limit_msg, reservation = await access_db.reserve(m.from_user.id)
+    except Exception:
+        logger.exception("Could not check the link limit")
+        await m.reply_text("⚠️ Something went wrong on my side. Please try again in a moment.", quote=True)
+        return
+    if not allowed:
+        await m.reply_text(limit_msg, quote=True)
+        return
+    try:
         log_msg = await m.forward(chat_id=Var.BIN_CHANNEL)
+        expires_at = await link_expiry.register(log_msg.id, m.from_user.id)
         # stream_link = f"{Var.URL}watch/{str(log_msg.id)}/{quote_plus(get_name(log_msg))}?hash={get_hash(log_msg)}"
 
         # online_link = f"{Var.URL}{str(log_msg.id)}/{quote_plus(get_name(log_msg))}?hash={get_hash(log_msg)}"
@@ -165,20 +154,27 @@ async def private_receive_handler(c: Client, m: Message):
 <b>♻️ This link is permanent and won't expire ♻️</b>"""
 
         await log_msg.reply_text(text=f"**RᴇQᴜᴇꜱᴛᴇᴅ ʙʏ :** [{m.from_user.first_name}](tg://user?id={m.from_user.id})\n**Uꜱᴇʀ ɪᴅ :** `{m.from_user.id}`\n**Stream ʟɪɴᴋ :** {stream_link}", disable_web_page_preview=True, quote=True)
+        link_text = msg_text.format(get_name(log_msg), humanbytes(get_media_file_size(m)), online_link, stream_link)
+        if expires_at:  # replace the 'permanent' note
+            link_text = re.sub(r"♻️[^♻]*♻️", f"⏳ This link expires in {fmt_duration(round(expires_at - time.time()))} ⏳", link_text, count=1)
         await m.reply_text(
 
-            text=msg_text.format(get_name(log_msg), humanbytes(get_media_file_size(m)), online_link, stream_link),
+            text=link_text,
 
             quote=True,
             disable_web_page_preview=True,
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⚡ ᴡᴀᴛᴄʜ ⚡", url=stream_link), #Stream Link
                                                 InlineKeyboardButton('⚡ ᴅᴏᴡɴʟᴏᴀᴅ ⚡', url=online_link)]]) #Download Link
         )
-        await access_db.record_usage(m.from_user.id)
     except FloodWait as e:
-        print(f"Sleeping for {str(e.x)}s")
-        await asyncio.sleep(e.x)
-        await c.send_message(chat_id=Var.BIN_CHANNEL, text=f"Gᴏᴛ FʟᴏᴏᴅWᴀɪᴛ ᴏғ {str(e.x)}s from [{m.from_user.first_name}](tg://user?id={m.from_user.id})\n\n**𝚄𝚜𝚎𝚛 𝙸𝙳 :** `{str(m.from_user.id)}`", disable_web_page_preview=True)
+        await access_db.refund(reservation)  # no link was delivered, so it must not count
+        logger.warning(f"FloodWait: sleeping for {e.value}s")
+        await asyncio.sleep(e.value)
+        await c.send_message(chat_id=Var.BIN_CHANNEL, text=f"Gᴏᴛ FʟᴏᴏᴅWᴀɪᴛ ᴏғ {str(e.value)}s from [{m.from_user.first_name}](tg://user?id={m.from_user.id})\n\n**𝚄𝚜𝚎𝚛 𝙸𝙳 :** `{str(m.from_user.id)}`", disable_web_page_preview=True)
+        await m.reply_text("Telegram asked me to slow down. Please send the file again.", quote=True)
+    except Exception:
+        await access_db.refund(reservation)
+        raise
 
 
 @StreamBot.on_message(filters.channel & ~filters.group & (filters.document | filters.video | filters.photo) & ~filters.forwarded, group=-1)
@@ -192,23 +188,28 @@ async def channel_receive_handler(bot, broadcast):
     # Only channels with an admin who has access to the bot are served (and that admin's limit applies).
     sponsor = await channel_sponsor(bot, broadcast.chat.id)
     if sponsor is None:
-        logging.info(f"Ignoring channel {broadcast.chat.id}: none of its admins has access to the bot")
-        return
-    allowed, limit_msg = await access_db.check_quota(sponsor)
-    if not allowed:
-        logging.info(f"Channel {broadcast.chat.id} skipped, limit reached for admin {sponsor}")
+        logger.info(f"Ignoring channel {broadcast.chat.id}: none of its admins has access to the bot")
         return
     if MY_PASS:
         check_pass = await pass_db.get_user_pass(broadcast.chat.id)
         if check_pass == None:
             await broadcast.reply_text("Login first using /login cmd \n don\'t know the pass? ask the bot owner")
             return
-        if check_pass != MY_PASS:
+        if check_pass != pass_token(MY_PASS):
             await broadcast.reply_text("Wrong password, login again")
             await pass_db.delete_user(broadcast.chat.id)
             return
     try:
+        allowed, limit_msg, reservation = await access_db.reserve(sponsor)
+    except Exception:
+        logger.exception("Could not check the link limit for a channel post")
+        return
+    if not allowed:
+        logger.info(f"Channel {broadcast.chat.id} skipped, limit reached for admin {sponsor}")
+        return
+    try:
         log_msg = await broadcast.forward(chat_id=Var.BIN_CHANNEL)
+        await link_expiry.register(log_msg.id, sponsor)
         stream_link = f"{Var.URL}watch/{str(log_msg.id)}/{quote_plus(get_name(log_msg))}?hash={get_hash(log_msg)}"
         online_link = f"{Var.URL}{str(log_msg.id)}/{quote_plus(get_name(log_msg))}?hash={get_hash(log_msg)}"
         await log_msg.reply_text(
@@ -225,13 +226,14 @@ async def channel_receive_handler(bot, broadcast):
                 ]
             )
         )
-        await access_db.record_usage(sponsor)
     except FloodWait as w:
-        print(f"Sleeping for {str(w.x)}s")
-        await asyncio.sleep(w.x)
+        await access_db.refund(reservation)
+        logger.warning(f"FloodWait: sleeping for {w.value}s")
+        await asyncio.sleep(w.value)
         await bot.send_message(chat_id=Var.BIN_CHANNEL,
-                             text=f"Gᴏᴛ FʟᴏᴏᴅWᴀɪᴛ ᴏғ {str(w.x)}s from {broadcast.chat.title}\n\n**Cʜᴀɴɴᴇʟ ID:** `{str(broadcast.chat.id)}`",
+                             text=f"Gᴏᴛ FʟᴏᴏᴅWᴀɪᴛ ᴏғ {str(w.value)}s from {broadcast.chat.title}\n\n**Cʜᴀɴɴᴇʟ ID:** `{str(broadcast.chat.id)}`",
                              disable_web_page_preview=True)
     except Exception as e:
+        await access_db.refund(reservation)
         await bot.send_message(chat_id=Var.BIN_CHANNEL, text=f"**#ᴇʀʀᴏʀ_ᴛʀᴀᴄᴇʙᴀᴄᴋ:** `{e}`", disable_web_page_preview=True)
-        print(f"Cᴀɴ'ᴛ Eᴅɪᴛ Bʀᴏᴀᴅᴄᴀsᴛ Mᴇssᴀɢᴇ!\nEʀʀᴏʀ:  **Give me edit permission in updates and bin Chanell{e}**")
+        logger.error(f"Cannot edit the channel message, give the bot edit permission in the updates and bin channels: {e}")

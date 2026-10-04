@@ -6,17 +6,21 @@ import time
 import math
 import traceback
 import logging
+logger = logging.getLogger("streamgram.server.stream_routes")
 import secrets
 import mimetypes
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import HTMLResponse, StreamingResponse, JSONResponse, Response
 from streamgram.bot import multi_clients, work_loads, StreamBot
-from streamgram.server.exceptions import FIleNotFound, InvalidHash
+from streamgram.server.exceptions import FIleNotFound, InvalidHash, LinkExpired
 from streamgram import StartTime, __version__
 from ..utils.time_format import get_readable_time
 from ..utils.custom_dl import ByteStreamer, offset_fix, chunk_size
 from streamgram.utils.render_template import render_page
 from streamgram.vars import Var
+from streamgram.utils.access import access_db
+from streamgram.utils.link_expiry import link_expiry
+from streamgram.utils.file_properties import hash_ok
 from datetime import datetime
 
 router = APIRouter()
@@ -95,8 +99,10 @@ async def watch_handler(request: Request, path: str):
         raise HTTPException(status_code=403, detail=e.message)
     except FIleNotFound as e:
         raise HTTPException(status_code=404, detail=e.message)
+    except LinkExpired as e:
+        raise HTTPException(status_code=410, detail=e.message)
     except Exception:
-        logging.exception("Watch page failed for %s", path)
+        logger.exception("Watch page failed for %s", path)
         raise HTTPException(status_code=500, detail="Internal server error")
 
 
@@ -111,8 +117,10 @@ async def stream_handler(request: Request, path: str):
         raise HTTPException(status_code=403, detail=e.message)
     except FIleNotFound as e:
         raise HTTPException(status_code=404, detail=e.message)
+    except LinkExpired as e:
+        raise HTTPException(status_code=410, detail=e.message)
     except Exception:
-        logging.exception("Streaming failed for %s", path)
+        logger.exception("Streaming failed for %s", path)
         raise HTTPException(status_code=500, detail="Internal server error")
 
 
@@ -129,20 +137,24 @@ async def media_streamer(request: Request, id: int, secure_hash: str):
     faster_client = multi_clients[index]
 
     if Var.MULTI_CLIENT:
-        logging.info(f"Client {index} is now serving {request.client.host}")
+        logger.info(f"Client {index} is now serving {request.client.host}")
 
     if faster_client in class_cache:
         tg_connect = class_cache[faster_client]
-        logging.debug(f"Using cached ByteStreamer object for client {index}")
+        logger.debug(f"Using cached ByteStreamer object for client {index}")
     else:
-        logging.debug(f"Creating new ByteStreamer object for client {index}")
+        logger.debug(f"Creating new ByteStreamer object for client {index}")
         tg_connect = ByteStreamer(faster_client)
         class_cache[faster_client] = tg_connect
+    if await access_db.is_revoked(id):
+        raise FIleNotFound
     file_id = await tg_connect.get_file_properties(id)
 
-    if file_id.unique_id[:6] != secure_hash:
-        logging.debug(f"Invalid hash for message with ID {id}")
+    if not hash_ok(file_id.unique_id, secure_hash):
+        logger.debug(f"Invalid hash for message with ID {id}")
         raise InvalidHash
+    if await link_expiry.is_expired(id):
+        raise LinkExpired
 
     file_size = file_id.file_size or 0
     byte_range = parse_range(range_header, file_size)
@@ -193,7 +205,7 @@ async def media_streamer(request: Request, id: int, secure_hash: str):
     }
     if byte_range:
         headers["Content-Range"] = f"bytes {from_bytes}-{until_bytes}/{file_size}"
-    logging.debug(f"Returning response for message with ID {id} bytes {from_bytes}-{until_bytes}.")
+    logger.debug(f"Returning response for message with ID {id} bytes {from_bytes}-{until_bytes}.")
     return StreamingResponse(body, status_code=206 if byte_range else 200, headers=headers, media_type="application/octet-stream")
 
 def sanitize_header_value(value):

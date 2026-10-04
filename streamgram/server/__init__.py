@@ -1,6 +1,8 @@
 # © agrprojects
+import asyncio
 import csv
 import os
+import threading
 from datetime import datetime
 from fastapi import FastAPI, Request
 from fastapi.responses import FileResponse
@@ -16,6 +18,14 @@ if not os.path.exists(log_file_path):
         writer = csv.writer(file)
         writer.writerow(["Timestamp", "IP Address", "Endpoint"])
 
+_csv_lock = threading.Lock()
+
+
+def _append_request_row(row):
+    with _csv_lock, open(log_file_path, mode='a', newline='') as file:
+        csv.writer(file).writerow(row)
+
+
 # Initialize FastAPI app
 app = FastAPI(docs_url=None, redoc_url=None)
 
@@ -27,10 +37,8 @@ async def request_logging_middleware(request: Request, call_next):
     ip_address = request.client.host
     endpoint = str(request.url)
 
-    # Log to the CSV file
-    with open(log_file_path, mode='a', newline='') as file:
-        writer = csv.writer(file)
-        writer.writerow([timestamp, ip_address, endpoint])
+    # Log to the CSV file (in a worker thread so the event loop is never blocked)
+    await asyncio.to_thread(_append_request_row, [timestamp, ip_address, endpoint])
 
     # Call the next middleware/handler
     response = await call_next(request)

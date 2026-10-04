@@ -1,13 +1,10 @@
 {
   "apps": [
     {
-      "name": "FileToLink_bot",
-      "script": "C:\\Users\\vnaga\\anaconda3\\envs\\environment-name\\python.exe",
-      "args": "-m streamgram",
-      "exec_interpreter": "none",
-      "exec_mode": "fork",
-      "out_file": "./logs/out.log",
-      "error_file": "./logs/error.log"
+      "name": "File-To-Link_Bot",
+      "script": "start_bot.py",
+      "interpreter": "python3",
+      "exec_mode": "fork"
     }
   ]
 }

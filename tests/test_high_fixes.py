@@ -11,6 +11,8 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 os.chdir(ROOT)  # templates and logs/ are resolved relative to the repository root
 import asyncio, random, types
 sys.path.insert(0, ROOT)
+sys.path.insert(0, os.path.join(ROOT, "tests"))
+from _shared import LOOP  # noqa: E402
 os.environ.update(API_ID="1", API_HASH="x", BOT_TOKEN="1:x", BIN_CHANNEL="-100", OWNER_ID="111", TRUSTED_USERS="222",
                   USER_GROUP_ID="-1005", MONGO_SCHEMA="mongodb", MONGO_HOST="127.0.0.1", MONGO_USERNAME="u", MONGO_PASSWORD="p",
                   FQDN="example.com")
@@ -20,6 +22,12 @@ from fastapi.testclient import TestClient
 from fastapi import HTTPException
 
 async def main():
+    from _shared import quiet_database
+    quiet_database()
+    import streamgram.server
+    from _shared import install_fakes
+    from streamgram.utils.access import access_db as _access_db
+    install_fakes(_access_db)
     from streamgram.server import stream_routes as sr
     from streamgram.utils import custom_dl, render_template
     from streamgram.utils.custom_dl import ByteStreamer, chunk_size, offset_fix
@@ -151,7 +159,7 @@ async def main():
     stm.pass_db = PD()
     await stm.login_password_handler(None, M("secret"));  assert not added                      # not waiting: ignored
     await stm.login_handler(None, M("/login")); assert 5 in stm.login_waiting
-    m = M("secret"); await stm.login_password_handler(None, m); assert added == [(5, "secret")] and m.deleted and 5 not in stm.login_waiting
+    m = M("secret"); await stm.login_password_handler(None, m); assert added == [(5, stm.pass_token("secret"))] and stm.pass_token("secret") != "secret" and m.deleted and 5 not in stm.login_waiting
     await stm.login_handler(None, M("/login")); await stm.login_password_handler(None, M("nope")); assert "Wrong" in sent[-1]
     await stm.login_handler(None, M("/login")); await stm.login_password_handler(None, M("/cancel")); assert "Cancelled" in sent[-1]
     await stm.login_handler(None, M("/login")); stm.login_waiting[5] = 0; await stm.login_password_handler(None, M("secret")); assert "can't wait" in sent[-1]
@@ -176,7 +184,7 @@ async def main():
     ok, detail = await db2.chat_visibility(Peer(), -1005); assert not ok and detail == "PeerIdInvalid"
     print("H6 ok: loud (once) PeerIdInvalid + visibility check")
 def test_high_fixes():
-    asyncio.run(main())
+    LOOP.run_until_complete(main())
 
 
 if __name__ == "__main__":

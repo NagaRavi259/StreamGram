@@ -2,6 +2,7 @@
 import asyncio
 import html
 import logging
+logger = logging.getLogger("streamgram.bot.plugins.access_admin")
 import time
 from datetime import datetime, timezone
 from urllib.parse import quote
@@ -11,12 +12,15 @@ from pyrogram.errors import MessageNotModified
 from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton as B, Message, CallbackQuery
 
 from streamgram.bot import StreamBot
+from streamgram.utils.link_expiry import link_expiry, parse_duration, format_ttl, PRESETS
 from streamgram.vars import Var
 from streamgram.utils.access import (
     access_db, is_exempt, profile_of, describe_quota, notify_owners, PERIODS, PERIOD_LABELS, ACCESS_STATUSES,
+    group_access, fmt_duration,
 )
 
 PER_PAGE = 8
+REQUEST_COOLDOWN = 3600  # seconds a rejected / revoked person must wait before asking again
 HTML = enums.ParseMode.HTML
 owner_only = filters.user(list(Var.OWNER_ID))
 inputs = {}  # owner_id -> pending text-input state
@@ -48,6 +52,9 @@ def who(rec_or_id, uid=None):
 
 
 async def edit(cq: CallbackQuery, text, rows):
+    if cq.message is None:  # the menu message is too old for Telegram to let us edit it
+        await cq.answer("This menu is too old, send /admin again.", show_alert=True)
+        return
     try:
         await cq.message.edit_text(
             text, reply_markup=InlineKeyboardMarkup(rows), parse_mode=HTML, disable_web_page_preview=True
@@ -95,9 +102,9 @@ async def backfill_join_requests():
                         await access_db.add_join_request(r.user.id)
                         n += 1
                     done.add(chat_id)
-                    logging.info(f"Backfilled {n} pending join requests from {chat_id}")
+                    logger.info(f"Backfilled {n} pending join requests from {chat_id}")
                 except Exception as e:
-                    logging.warning(f"Could not backfill join requests for {chat_id} (retrying in {delay}s): {e}")
+                    logger.warning(f"Could not backfill join requests for {chat_id} (retrying in {delay}s): {e}")
             if all(c in done for c in todo):
                 continue
             await asyncio.sleep(delay)
@@ -161,6 +168,10 @@ async def request_access(c: Client, cq: CallbackQuery):
         return await cq.answer("You already have access. Send /start.", show_alert=True)
     if status == "pending":
         return await cq.answer("Your request is already waiting for approval.", show_alert=True)
+    if status in ("rejected", "revoked"):
+        wait = (rec.get("updated_at") or 0) + REQUEST_COOLDOWN - time.time()
+        if wait > 0:
+            return await cq.answer(f"Please wait about {fmt_duration(wait)} before asking again.", show_alert=True)
     await access_db.set_status(user.id, "pending", 0, profile_of(user), note="requested via button")
     await cq.answer("Request sent ✅")
     try:
@@ -231,7 +242,7 @@ async def apply_action(c: Client, owner_id, action, uid):
         try:
             await c.send_message(uid, to_user, parse_mode=HTML)
         except Exception as e:
-            logging.info(f"Could not notify user {uid}: {e}")
+            logger.info(f"Could not notify user {uid}: {e}")
 
 
 @StreamBot.on_callback_query(filters.regex(r"^adm:(apr|rej|ban|unban|rev):\d+$") & owner_only)
@@ -240,16 +251,31 @@ async def on_action(c: Client, cq: CallbackQuery):
     uid = int(uid)
     rec = await access_db.get_user(uid) or {"id": uid}
     # request notifications carry only decision buttons -> replace them with the outcome
-    is_notification = cq.message.text and cq.message.text.startswith("🔔")
+    is_notification = bool(cq.message and cq.message.text and cq.message.text.startswith("🔔"))
     already = rec.get("status") == ACTIONS[action][0]
     if not already:
         await apply_action(c, cq.from_user.id, action, uid)
-    await cq.answer(OUTCOME[action] + (" (already)" if already else ""))
+    note = OUTCOME[action] + (" (already)" if already else "")
+    if action in ("rev", "rej") and await group_access(c, uid):
+        # revoking cannot remove access that comes from an access group; only a ban can
+        await cq.answer(note + " — but they still have access through an access group. Use Ban to block them.", show_alert=True)
+    else:
+        await cq.answer(note)
     if is_notification:
         rec = await access_db.get_user(uid) or rec
-        await edit(cq, f"{OUTCOME[action]}: {who(rec)} (<code>{uid}</code>)\nby {html.escape(cq.from_user.first_name)}", [])
+        # a single inert button replaces the decision buttons and shows the outcome
+        await edit(
+            cq,
+            f"{OUTCOME[action]}: {who(rec)} (<code>{uid}</code>)\nby {html.escape(cq.from_user.first_name)}",
+            [[B(OUTCOME[action], callback_data="adm:noop")]],
+        )
     else:
-        await show_user(cq, uid)
+        await show_user(c, cq, uid)
+
+
+@StreamBot.on_callback_query(filters.regex(r"^adm:noop$") & owner_only)
+async def cb_noop(c: Client, cq: CallbackQuery):
+    await cq.answer()
 
 
 # ---------------------------------------------------------------- /admin menu
@@ -257,16 +283,19 @@ async def home_view():
     pending = await access_db.count_users(("pending",))
     approved = await access_db.count_users(ACCESS_STATUSES)
     period, limit = await access_db.get_default_quota()
+    default_ttl = await link_expiry.get_default()
     text = (
-        "🛠 <b>Admin menu</b>\n\n"
+        "🛠 <b>Admin menu</b>\n(stop serving a file: /revoke &lt;message id&gt;)\n\n"
         f"Users with access: <b>{approved}</b>\n"
         f"Pending requests: <b>{pending}</b>\n"
-        f"Default limit: <b>{describe_quota(period, limit)}</b>"
+        f"Default limit: <b>{describe_quota(period, limit)}</b>\n"
+        f"Default link expiry: <b>{format_ttl(default_ttl)}</b>"
     )
     rows = [
         [B("📨 Invite a person", callback_data="adm:inv"), B(f"👥 Users ({approved})", callback_data="adm:users:0")],
         [B(f"⏳ Pending ({pending})", callback_data="adm:pend:0"), B("🏘 Groups", callback_data="adm:grp")],
         [B("📊 Default limit", callback_data="adm:q:0"), B("📜 History", callback_data="adm:hist:0")],
+        [B("⏳ Link expiry", callback_data="adm:x:0")],
         [B("✖ Close", callback_data="adm:close")],
     ]
     return text, rows
@@ -289,7 +318,8 @@ async def cb_home(c, cq):
 @StreamBot.on_callback_query(filters.regex(r"^adm:close$") & owner_only)
 async def cb_close(c, cq):
     inputs.pop(cq.from_user.id, None)
-    await cq.message.delete()
+    if cq.message is not None:
+        await cq.message.delete()
 
 
 # ---- users list (recent -> old) and detail
@@ -323,13 +353,14 @@ async def cb_pending(c, cq):
         ("pending",), page, "⏳ Pending requests (<b>{total}</b>), newest first", "adm:pend", "requested_at"))
 
 
-async def show_user(cq, uid):
+async def show_user(c, cq, uid):
     rec = await access_db.get_user(uid)
     if not rec:
         return await edit(cq, "User not found.", [HOME_BTN])
     status = rec.get("status", "-")
     period, limit = await access_db.effective_quota(uid)
     own = rec.get("quota")
+    ttl, ttl_source = await link_expiry.effective(uid)
     usage = []
     for p in ("hour", "day", "week", "month", "life"):
         usage.append(f"{PERIOD_LABELS[p]}: {await access_db.count_usage(uid, p)}")
@@ -342,8 +373,11 @@ async def show_user(cq, uid):
         f"Access: {'via group membership / join request' if status == 'group' else 'granted ' + when(rec.get('granted_at')) + (' via ' + rec['source'] if rec.get('source') else '')}\n"
         f"Last update: {when(rec.get('updated_at'))}\n"
         f"Limit: <b>{describe_quota(period, limit)}</b> ({'personal' if own else 'default'})\n"
+        f"Link expiry: <b>{format_ttl(ttl)}</b> ({ttl_source})\n"
         f"Links generated — " + " · ".join(usage)
     )
+    if status not in ("group", "banned") and await group_access(c, uid):
+        text += "\n\n⚠️ Also has access through an access group / join request. Revoke does not remove that; use Ban to block."
     if status == "group":
         first = [B("🚫 Ban", callback_data=f"adm:ban:{uid}")]  # access comes from the group; only a ban overrides it
     elif status == "approved":
@@ -355,6 +389,7 @@ async def show_user(cq, uid):
     rows = [
         first,
         [B("📊 Set limit", callback_data=f"adm:q:{uid}"), B("📜 History", callback_data=f"adm:uh:{uid}:0")],
+        [B("⏳ Link expiry", callback_data=f"adm:x:{uid}")],
         [B("◀ Users", callback_data="adm:users:0"), *HOME_BTN],
     ]
     await edit(cq, text, rows)
@@ -362,7 +397,7 @@ async def show_user(cq, uid):
 
 @StreamBot.on_callback_query(filters.regex(r"^adm:u:\d+$") & owner_only)
 async def cb_user(c, cq):
-    await show_user(cq, int(cq.data.split(":")[2]))
+    await show_user(c, cq, int(cq.data.split(":")[2]))
 
 
 # ---- history
@@ -372,7 +407,7 @@ def history_text(items, total, title):
         by = f" by <code>{h['by']}</code>" if h.get("by") else ""
         lines.append(
             f"{when(h['ts'])} · <b>{h['action']}</b> · {html.escape(h.get('name') or '')} "
-            f"<code>{h['uid']}</code>{by}"
+            f"{('<code>' + str(h['uid']) + '</code>') if h['uid'] else '(system)'}{by}"
         )
     if not items:
         lines.append("Nothing yet.")
@@ -431,7 +466,7 @@ async def cb_quota_period(c, cq):
             await access_db.set_user_quota(uid, "unlimited", None)
         await access_db.log(uid or 0, f"limit_{period}", cq.from_user.id)
         await cq.answer("Saved ✅")
-        return await (show_user(cq, uid) if uid else cb_home(c, cq))
+        return await (show_user(c, cq, uid) if uid else cb_home(c, cq))
     inputs[cq.from_user.id] = {"kind": "quota", "uid": uid, "period": period}
     await edit(
         cq,
@@ -439,6 +474,61 @@ async def cb_quota_period(c, cq):
         "Send /cancel to abort.",
         [[B("✖ Cancel", callback_data="adm:home")]],
     )
+
+
+# ---- link expiry (per user, or default when uid == 0)
+@StreamBot.on_callback_query(filters.regex(r"^adm:x:\d+$") & owner_only)
+async def cb_expiry(c, cq):
+    inputs.pop(cq.from_user.id, None)
+    uid = int(cq.data.split(":")[2])
+    if uid == 0:
+        ttl, target = await link_expiry.get_default(), "everyone (default)"
+        source = ""
+    else:
+        ttl, src = await link_expiry.effective(uid)
+        target, source = f"user <code>{uid}</code>", f" ({src})"
+    text = (
+        f"⏳ <b>Link expiry</b> for {target}\nCurrent: <b>{format_ttl(ttl)}</b>{source}\n\n"
+        "A link stops working this long after it is created. Applies to links created from now on; "
+        "existing links keep what they had."
+    )
+    rows = [[B(label, callback_data=f"adm:xp:{uid}:{secs}") for label, secs in PRESETS[i:i + 3]] for i in range(0, len(PRESETS), 3)]
+    rows.append([B("✏️ Custom", callback_data=f"adm:xp:{uid}:custom"), B("♾ Unlimited", callback_data=f"adm:xp:{uid}:unlimited")])
+    if uid:
+        rows.append([B("↩ Use default", callback_data=f"adm:xp:{uid}:default")])
+        rows.append([B("◀ User", callback_data=f"adm:u:{uid}"), *HOME_BTN])
+    else:
+        rows.append(HOME_BTN)
+    await edit(cq, text, rows)
+
+
+async def apply_expiry(uid, value, owner_id):
+    """value: seconds, None (unlimited) or the string 'default' (drop the personal setting)."""
+    if value == "default":
+        await link_expiry.clear_personal(uid)
+        note = "default"
+    elif uid == 0:
+        await link_expiry.set_default(value)
+        note = format_ttl(value)
+    else:
+        await link_expiry.set_personal(uid, value)
+        note = format_ttl(value)
+    await access_db.log(uid, "expiry_set", owner_id, note)
+    return note
+
+
+@StreamBot.on_callback_query(filters.regex(r"^adm:xp:\d+:(\d+|unlimited|default|custom)$") & owner_only)
+async def cb_expiry_set(c, cq):
+    _, _, uid, value = cq.data.split(":")
+    uid = int(uid)
+    if value == "custom":
+        inputs[cq.from_user.id] = {"kind": "ttl", "uid": uid}
+        return await edit(cq, "Send how long links should live, e.g. <code>30m</code>, <code>12h</code>, <code>3d</code>, "
+                              "<code>2w</code> or <code>1d12h</code>.\n/cancel to abort.", [[B("✖ Cancel", callback_data=f"adm:x:{uid}")]])
+    parsed = None if value == "unlimited" else ("default" if value == "default" else int(value))
+    note = await apply_expiry(uid, parsed, cq.from_user.id)
+    await cq.answer(f"Saved: {note} ✅")
+    await (show_user(c, cq, uid) if uid else cb_home(c, cq))
 
 
 # ---- invites
@@ -540,6 +630,20 @@ async def cb_group_manual(c, cq):
                [[B("✖ Cancel", callback_data="adm:grp")]])
 
 
+# ---------------------------------------------------------------- revoke a file link
+@StreamBot.on_message(filters.command(["revoke", "unrevoke"]) & filters.private & owner_only)
+async def revoke_cmd(c: Client, m: Message):
+    """/revoke <message id>: stop serving a file. The id is the number in its link (…/<id>/?hash=…)."""
+    cmd, args = m.command[0], m.command[1:]
+    if len(args) != 1 or not args[0].isdigit():
+        return await m.reply_text(f"Usage: /{cmd} <message id from the link>")
+    msg_id = int(args[0])
+    await access_db.set_revoked(msg_id, revoked=(cmd == "revoke"))
+    await access_db.log(0, "link_revoked" if cmd == "revoke" else "link_restored", m.from_user.id, str(msg_id))
+    await m.reply_text(f"{'⛔ Links to' if cmd == 'revoke' else '♻️ Links to'} message <code>{msg_id}</code> "
+                       f"{'no longer work' if cmd == 'revoke' else 'work again'}.", parse_mode=HTML)
+
+
 # ---------------------------------------------------------------- owner text input
 @StreamBot.on_message(filters.private & filters.text & owner_only, group=5)
 async def owner_input(c: Client, m: Message):
@@ -566,9 +670,36 @@ async def owner_input(c: Client, m: Message):
             inputs.pop(m.from_user.id)
             await m.reply_text(f"✅ Limit saved: <b>{describe_quota(period, limit)}</b>\n/admin", parse_mode=HTML)
 
-        elif kind == "invite_user":
-            target = await c.get_users(int(text) if text.lstrip("-").isdigit() else text.lstrip("@"))
+        elif kind == "ttl":
+            try:
+                seconds = parse_duration(text)
+            except ValueError as e:
+                return await m.reply_text(f"{e}\nTry again or /cancel.")
+            note = await apply_expiry(state["uid"], seconds, m.from_user.id)
             inputs.pop(m.from_user.id)
+            await m.reply_text(f"✅ Link expiry saved: <b>{note}</b>\n/admin", parse_mode=HTML)
+
+        elif kind == "invite_user":
+            is_id = text.lstrip("-").isdigit()
+            target = None
+            try:
+                target = await c.get_users(int(text) if is_id else text.lstrip("@"))
+            except Exception:
+                if not is_id:
+                    raise  # an unknown @username cannot be resolved at all
+            inputs.pop(m.from_user.id)
+            if target is None:
+                # The bot has never met this person, so it cannot DM them: make a link only that ID can use.
+                token = await access_db.create_invite(m.from_user.id, int(text))
+                await access_db.log(int(text), "invited", m.from_user.id, "link only")
+                link = invite_link(token)
+                await m.reply_text(
+                    f"ℹ️ I can't look up <code>{int(text)}</code> (they haven't talked to the bot yet), so I can't DM them. "
+                    f"Send them this link; only that account can use it:\n\n<code>{link}</code>",
+                    parse_mode=HTML, disable_web_page_preview=True,
+                    reply_markup=InlineKeyboardMarkup(share_markup(link)),
+                )
+                return
             token = await access_db.create_invite(m.from_user.id, target.id)
             await access_db.log(target.id, "invited", m.from_user.id)
             link = invite_link(token)

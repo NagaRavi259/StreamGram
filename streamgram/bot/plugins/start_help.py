@@ -1,35 +1,24 @@
 #Aadhi000
 from streamgram.bot import StreamBot
 from streamgram.vars import Var
+import html
+import re
 import logging
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("streamgram.bot.plugins.start_help")
 from streamgram.bot.plugins.stream import MY_PASS
 from streamgram.utils.human_readable import humanbytes
-from streamgram.utils.database import Database, get_mongo_uri
+from streamgram.utils.database import Database
 from streamgram.utils.access import has_access, access_db, is_exempt
+from streamgram.utils.link_expiry import link_expiry
 from pyrogram import Client, filters, StopPropagation, enums
 from pyrogram.handlers import MessageHandler
 from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton, Message
 from pyrogram.errors import UserNotParticipant, PeerIdInvalid
-from streamgram.utils.file_properties import get_name, get_hash, get_media_file_size
+from streamgram.utils.file_properties import get_name, get_hash, get_media_file_size, get_media_from_message, hash_ok
 from pyrogram.types import ReplyKeyboardMarkup
 import asyncio
-import sys
 
-try:
-    loop = asyncio.get_event_loop()
-    database_url = get_mongo_uri()
-    db = Database(database_url, Var.name)
-    if loop.is_running():
-        # If the event loop is already running, schedule the task in it
-        task = loop.create_task(db.initialize())
-        # Optionally, handle exceptions inside the task
-        task.add_done_callback(
-            lambda t: t.exception() and logging.critical(f"Database initialization error: {t.exception()}")
-        )
-except Exception as e:
-    logging.critical(f"Critical error occurred during database initialization: {e}")
-    sys.exit(1)  # Force exit the program if database initialization fails
+db = Database.shared(Var.name)
 
 
 # ----------------- MIDDLEWARE HANDLER (Corrected) ----------------- #
@@ -52,10 +41,18 @@ async def check_user(b: Client, m: Message):
             else "❌ This invite is invalid, expired or not for you."
         )
         raise StopPropagation()
-    allowed, reason = await has_access(b, m.from_user.id)
+    try:
+        allowed, reason = await has_access(b, m.from_user.id)
+    except Exception:
+        logger.exception("Access check failed")
+        await m.reply_text("⚠️ Something went wrong on my side. Please try again in a moment.")
+        raise StopPropagation()
     if allowed:
         if not is_exempt(m.from_user.id):
-            await access_db.touch(m.from_user)
+            try:
+                await access_db.touch(m.from_user)
+            except Exception:
+                logger.exception("Could not record activity")  # bookkeeping only: never block the user
         return
     if reason == "banned":
         await m.reply_text("🚫 **You are banned from this bot.**")
@@ -79,9 +76,9 @@ async def start(b, m):
             Var.BIN_CHANNEL,
             f"#NEW_USER: \n\nNew User [{m.from_user.first_name}](tg://user?id={m.from_user.id}) Started !!"
         )
-    usr_cmd = m.text.split("_")[-1]
-    if usr_cmd == "/start":
-        if Var.UPDATES_CHANNEL is not None:
+    payload = (m.text.split(maxsplit=1) + [""])[1].strip()
+    if not payload:
+        if Var.UPDATES_CHANNEL:
             try:
                 user = await b.get_chat_member(Var.UPDATES_CHANNEL, m.chat.id)
                 if user.status == "banned":
@@ -117,7 +114,7 @@ async def start(b, m):
             caption="**Hello! ⚡**\n\nI'm StreamGram — send me any file or video and I'll turn it into a permanent download link and a stream link.\n\nUse /help for more details.",
         )
     else:
-        if Var.UPDATES_CHANNEL is not None:
+        if Var.UPDATES_CHANNEL:
             try:
                 user = await b.get_chat_member(Var.UPDATES_CHANNEL, m.chat.id)
                 if user.status == "banned":
@@ -149,34 +146,33 @@ async def start(b, m):
                     disable_web_page_preview=True)
                 return
 
-        get_msg = await b.get_messages(chat_id=Var.BIN_CHANNEL, ids=int(usr_cmd))
-
-        file_size = None
-        if get_msg.video:
-            file_size = f"{humanbytes(get_msg.video.file_size)}"
-        elif get_msg.document:
-            file_size = f"{humanbytes(get_msg.document.file_size)}"
-        elif get_msg.audio:
-            file_size = f"{humanbytes(get_msg.audio.file_size)}"
-
-        file_name = None
-        if get_msg.video:
-            file_name = f"{get_msg.video.file_name}"
-        elif get_msg.document:
-            file_name = f"{get_msg.document.file_name}"
-        elif get_msg.audio:
-            file_name = f"{get_msg.audio.file_name}"
-
-        stream_link = "https://{}/{}".format(Var.FQDN, get_msg.id) if Var.ON_HEROKU or Var.NO_PORT else \
-            "http://{}:{}/{}".format(Var.FQDN,
-                                     Var.PORT,
-                                     get_msg.id)
-
-        msg_text = "**Your link is ready⚡\n\n📧 File name:\n{}\n {}\n\n💌 Download link: {}\n\n♻️ This link is permanent and won't expire ♻️**"
+        # Deep link: /start <message id>_<hash>. The hash is required, so ids cannot be enumerated.
+        invalid = "❌ This link is not valid."
+        match = re.fullmatch(r"(?:file_)?(\d+)_([A-Za-z0-9_-]{6,12})", payload)
+        if not match:
+            await m.reply_text(invalid)
+            return
+        msg_id, secure_hash = int(match.group(1)), match.group(2)
+        media = None
+        try:
+            get_msg = await b.get_messages(Var.BIN_CHANNEL, msg_id)
+            media = None if get_msg.empty else get_media_from_message(get_msg)
+        except Exception:
+            pass
+        if not media or not hash_ok(media.file_unique_id, secure_hash) or await access_db.is_revoked(msg_id) \
+                or await link_expiry.is_expired(msg_id):
+            await m.reply_text(invalid)
+            return
+        file_name = html.escape(getattr(media, "file_name", None) or "file")
+        file_size = humanbytes(getattr(media, "file_size", 0))
+        online_link = f"{Var.URL}{msg_id}/?hash={secure_hash}"
+        stream_link = f"{Var.URL}watch/{msg_id}/?hash={secure_hash}"
         await m.reply_text(
-            text=msg_text.format(file_name, file_size, stream_link),
-
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⚡ ᴅᴏᴡɴʟᴏᴀᴅ ɴᴏᴡ ⚡", url=stream_link)]])
+            text=f"<b>Your link is ready ⚡</b>\n\n📧 <b>File name:</b> {file_name}\n📦 <b>Size:</b> {file_size}\n\n💌 <b>Download:</b> {online_link}",
+            parse_mode=enums.ParseMode.HTML,
+            disable_web_page_preview=True,
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⚡ Watch ⚡", url=stream_link),
+                                                InlineKeyboardButton("⚡ Download ⚡", url=online_link)]])
         )
 
 
@@ -188,7 +184,7 @@ async def help_handler(bot, message):
             Var.BIN_CHANNEL,
             f"#NEW_USER: \n\nNew User [{message.from_user.first_name}](tg://user?id={message.from_user.id}) Started !!"
         )
-    if Var.UPDATES_CHANNEL is not None:
+    if Var.UPDATES_CHANNEL:
         try:
             user = await bot.get_chat_member(Var.UPDATES_CHANNEL, message.chat.id)
             if user.status == "banned":
@@ -240,7 +236,7 @@ async def about_handler(bot, message):
             Var.BIN_CHANNEL,
             f"#NEW_USER: \n\nNew User [{message.from_user.first_name}](tg://user?id={message.from_user.id}) Started !!"
         )
-    if Var.UPDATES_CHANNEL is not None:
+    if Var.UPDATES_CHANNEL:
         try:
             user = await bot.get_chat_member(Var.UPDATES_CHANNEL, message.chat.id)
             if user.status == "banned":

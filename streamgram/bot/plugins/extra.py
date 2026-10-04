@@ -3,12 +3,13 @@ from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 from pyrogram import filters
 import time
 import shutil, psutil
-from utils_bot import *
+from streamgram.vars import Var
+from streamgram.utils.formatting import readable_time, get_readable_file_size
 from streamgram import StartTime
 
         
     
-@StreamBot.on_message(filters.command('stats') & filters.private)
+@StreamBot.on_message(filters.command(['stats', 'status']) & filters.private & filters.user(list(Var.OWNER_ID)))
 async def stats(bot, update):
   currentTime = readable_time((time.time() - StartTime))
   total, used, free = shutil.disk_usage('.')

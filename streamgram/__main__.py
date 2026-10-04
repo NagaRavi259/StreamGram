@@ -4,49 +4,20 @@ import sys
 import glob
 import asyncio
 import logging
-import datetime
-from logging.handlers import RotatingFileHandler
 import importlib
 from pathlib import Path
 from pyrogram import idle
 from .bot import StreamBot
 from .vars import Var
+from .utils.logging_config import setup_logging
 import uvicorn
 from .server import app  # Import FastAPI app instance
 from .utils.keepalive import ping_server
 from streamgram.bot.clients import initialize_clients
 
-# Generate a timestamp
-timestamp = datetime.datetime.now().strftime("%Y%m%d%H%M%S")
-
-# Set up the logging configuration with a timestamped filename
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-    datefmt="%Y-%m-%d %H:%M:%S",
-    handlers=[
-        RotatingFileHandler(
-            f'logs/log_{timestamp}.log',  # Dynamic filename with timestamp
-            # maxBytes=1000000,  # Max size in bytes before rotating
-            backupCount=5,  # Number of backup files to keep
-            encoding='utf-8'  # Ensure correct file encoding
-        )
-    ]
-)
-
-log_level = logging.ERROR
-# Setting logging levels for specific modules
-logging.getLogger("fastapi").setLevel(log_level)
-logging.getLogger("starlette").setLevel(log_level)
-logging.getLogger("uvicorn").setLevel(log_level)
-logging.getLogger("uvicorn.access").setLevel(log_level)
-logging.getLogger("uvicorn.error").setLevel(log_level)
-
-# Setting DEBUG level for Pyrogram, which is a Telegram client library
-logging.getLogger("pyrogram").setLevel(log_level)
-
-# Example of logging usage
-logging.info("Logging system with RotatingFileHandler is set up and ready.")
+setup_logging(Var.LOG_LEVEL, Var.LOG_DIR, Var.LOG_MAX_MB * 1024 * 1024, Var.LOG_BACKUPS, Var.LOG_LIBS_LEVEL)
+logger = logging.getLogger("streamgram")
+logger.info("Logging ready (level %s, files in %s/)", Var.LOG_LEVEL.upper(), Var.LOG_DIR)
 
 ppath = "streamgram/bot/plugins/*.py"
 files = glob.glob(ppath)
@@ -102,4 +73,4 @@ if __name__ == '__main__':
     try:
         loop.run_until_complete(start_services())
     except KeyboardInterrupt:
-        logging.info('----------------------- Service Stopped -----------------------')
+        logger.info('Service stopped')

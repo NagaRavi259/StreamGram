@@ -1,6 +1,7 @@
 import math
 import asyncio
 import logging
+logger = logging.getLogger("streamgram.utils.custom_dl")
 from streamgram.vars import Var
 from typing import Dict, Union
 from streamgram.bot import work_loads
@@ -51,7 +52,7 @@ class ByteStreamer:
         """
         if id not in self.cached_file_ids:
             await self.generate_file_properties(id)
-            logging.debug(f"Cached file properties for message with ID {id}")
+            logger.debug(f"Cached file properties for message with ID {id}")
         return self.cached_file_ids[id]
     
     async def generate_file_properties(self, id: int) -> FileId:
@@ -60,12 +61,12 @@ class ByteStreamer:
         returns ths properties in a FIleId class.
         """
         file_id = await get_file_ids(self.client, Var.BIN_CHANNEL, id)
-        logging.debug(f"Generated file ID and Unique ID for message with ID {id}")
+        logger.debug(f"Generated file ID and Unique ID for message with ID {id}")
         if not file_id:
-            logging.debug(f"Message with ID {id} not found")
+            logger.debug(f"Message with ID {id} not found")
             raise FIleNotFound
         self.cached_file_ids[id] = file_id
-        logging.debug(f"Cached media message with ID {id}")
+        logger.debug(f"Cached media message with ID {id}")
         return self.cached_file_ids[id]
 
     async def generate_media_session(self, client: Client, file_id: FileId) -> Session:
@@ -102,7 +103,7 @@ class ByteStreamer:
                         )
                         break
                     except AuthBytesInvalid:
-                        logging.debug(
+                        logger.debug(
                             f"Invalid authorization bytes for DC {file_id.dc_id}"
                         )
                         continue
@@ -118,10 +119,10 @@ class ByteStreamer:
                     is_media=True,
                 )
                 await media_session.start()
-            logging.debug(f"Created media session for DC {file_id.dc_id}")
+            logger.debug(f"Created media session for DC {file_id.dc_id}")
             client.media_sessions[file_id.dc_id] = media_session
         else:
-            logging.debug(f"Using cached media session for DC {file_id.dc_id}")
+            logger.debug(f"Using cached media session for DC {file_id.dc_id}")
         return media_session
 
 
@@ -190,7 +191,7 @@ class ByteStreamer:
         client = self.client
         work_loads[index] += 1
         current_part = 0
-        logging.debug(f"Starting to yielding file with client {index}.")
+        logger.debug(f"Starting to yielding file with client {index}.")
         try:
             media_session = await self.generate_media_session(client, file_id)
             location = await self.get_location(file_id)
@@ -206,9 +207,9 @@ class ByteStreamer:
                 yield r.bytes[start:end]
                 offset += chunk_size
         except (TimeoutError, AttributeError) as e:
-            logging.warning(f"Stream interrupted at part {current_part}/{part_count}: {e!r}")
+            logger.warning(f"Stream interrupted at part {current_part}/{part_count}: {e!r}")
         finally:
-            logging.debug(f"Finished yielding file with {current_part} parts.")
+            logger.debug(f"Finished yielding file with {current_part} parts.")
             work_loads[index] -= 1
 
     async def clean_cache(self) -> None:
@@ -218,4 +219,4 @@ class ByteStreamer:
         while True:
             await asyncio.sleep(self.clean_timer)
             self.cached_file_ids.clear()
-            logging.debug("Cleaned the cache")
+            logger.debug("Cleaned the cache")
