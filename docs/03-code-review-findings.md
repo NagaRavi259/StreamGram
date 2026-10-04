@@ -1,7 +1,7 @@
 # Code Review Findings
 
 Review date: 2026-10-03. Scope: whole repository including the new access system (`streamgram/utils/access.py`, `streamgram/bot/plugins/access_admin.py`, changes in `start_help.py` / `stream.py`).
-The review itself changed no code. **High items H1–H8 were fixed afterwards (marked below); Medium/Low are still open.**
+The review itself changed no code. **High (H1–H8), Medium (M1–M14) and Low (L1–L12) items were fixed afterwards; see the status notes.**
 
 How certain is each item?
 - **Verified** — reproduced by a script or seen in the live logs / database.
@@ -95,6 +95,27 @@ Startup logs `Could not backfill join requests for <USER_GROUP_ID>: Peer id inva
 | M13 | **`FloodWait.x`** no longer exists in Pyrogram 2.x (`.value`), and `broadcast_helper.send_msg` returns an un-awaited coroutine after sleeping. | `broadcast_helper.py`, `stream.py` | Code |
 | M14 | **Self-HTTP request** to the public URL for non-media pages needs the server to reach its own `FQDN` (fails behind NAT/HTTPS) and opens a real Telegram download just to read a header. (Goes away with H4's fix.) | `render_template.py` | Code |
 
+## Medium — status (fixed 2026-10-03)
+
+| ID | Result |
+|---|---|
+| M1 | **Corrected finding:** inside one process the 60 s throttle already prevented the race, so it was not reachable as described. `touch()` now also falls back to an update on `DuplicateKeyError` (covers restarts / a second process). |
+| M2 | Fixed. A database failure in the access check or the limit check now answers "Something went wrong on my side, try again"; a failure while recording activity is logged and never blocks the user. |
+| M3 | Fixed. `AccessDB.reserve()` checks the limit and counts the link under a per-user lock; `refund()` gives it back if no link was delivered. 10 simultaneous files with a limit of 3 → exactly 3 allowed. Also used for channel posts. |
+| M4 | Fixed. A rejected or revoked person must wait 1 hour (`REQUEST_COOLDOWN`) before asking again. |
+| M5 | Fixed. Revoke/Reject now warn the owner when the person still has access through an access group or join request (use Ban); the user page shows the same warning. |
+| M6 | Fixed. Inviting a numeric ID the bot has never seen creates a link that only that account can redeem, instead of an error. Unknown @usernames still cannot be resolved. |
+| M7 | Fixed earlier with H6 (retrying backfill, re-triggered when a group is added). |
+| M8 | Fixed. Decision buttons are replaced by one inert outcome button (`adm:noop`) instead of an empty keyboard. |
+| M9 | Fixed. `/start <message id>_<hash>` needs a valid hash (so ids cannot be enumerated), shows an escaped name and working links, honours revocation, and rejects anything else with one generic message. The old call used a keyword that does not exist in this Pyrogram version and could never have worked. |
+| M10 | Partly fixed. New links carry 12 characters of the file id (links created earlier keep working with 6). Owners can stop serving a file with `/revoke <message id>` and undo it with `/unrevoke <message id>` (checked on every request, cached 30 s). **Not done:** automatic link expiry. |
+| M11 | Fixed. `TRUSTED_USERS` and `OWNER_ID` accept spaces and/or commas; blank or unset means nobody. |
+| M12 | Fixed. `/broadcast` without a replied-to message explains how to use it; banned people are skipped and counted. Records in `access_users` are intentionally kept when someone leaves the broadcast list, because access does not depend on it. |
+| M13 | Fixed. `FloodWait.value` is used everywhere and the broadcast retry is awaited; a rate-limited file upload is refunded and the user is asked to resend. |
+| M14 | Fixed earlier with H4 (no self-request). |
+
+Regression tests: `tests/test_medium_fixes.py` (run together with `tests/test_high_fixes.py` via `pytest tests`). Checked live on the running service: legacy 6-character links still stream, `/revoke`-style revocation returns 404 for both the file and the watch page, and restoring it returns 206.
+
 ## Low / hygiene
 
 | ID | Finding |
@@ -113,6 +134,23 @@ Startup logs `Could not backfill join requests for <USER_GROUP_ID>: Peer id inva
 | L12 | `access_admin.py` and `utils/access.py` (new) are untracked and uncommitted; `docs/` too. |
 
 ---
+
+## Low — status (fixed 2026-10-04)
+
+| ID | Result |
+|---|---|
+| L1 | Fixed. Fixed-name rotating `info.log` / `error.log` with size limits replace one file per start; level from `LOG_LEVEL` (INFO); old run logs older than a week deleted; pm2 logs trimmed; the request CSV is kept and no longer written on the event loop. |
+| L2 | Fixed. `UPDATES_CHANNEL` is `None` when unset / blank / "none"; all checks use truthiness. |
+| L3 | Fixed. `HAS_SSL`, `NO_PORT` accept true/false/1/0/yes/no/on/off; duplicate `WORKERS` removed. |
+| L4 | Fixed. One shared Mongo client and one `Database` per name (`Database.shared`); unique index on `users.id` (8 duplicate rows removed first). |
+| L5 | Fixed. Login stores a SHA-256 token of `MY_PASS`, never the password (changing `MY_PASS` logs everyone out). |
+| L6 | Fixed. `/stats` (also `/status`) is owner-only. |
+| L7 | Fixed earlier with H1 (timeouts logged, no extra chunk, `Content-Range` only on 206). |
+| L8 | Fixed. `fastapi` and `uvicorn` added, unused `pyromod` removed, `requirements-dev.txt` added, `process.json` made portable (not applied to the running service). |
+| L9 | Fixed. Stale menus answer "send /admin again"; history shows "(system)" instead of uid 0. |
+| L10 | Mostly fixed. Formatting helpers moved into the package without duplicates, unused `file_size.py`, `setup.cfg`, `sonar-project.properties` removed. **Left for later:** upstream branding / donation / channel links in the texts. The untracked `solution_distances*.py` files were not touched. |
+| L11 | Fixed. The media template uses an unambiguous `__MEDIA__` placeholder. |
+| L12 | Work is committed locally (not pushed). |
 
 ## Behaviour notes (not bugs, but easy to misread)
 

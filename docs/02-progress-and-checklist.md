@@ -96,8 +96,12 @@ Taken from `git log` and the code:
 - [x] **F3.** H8/L1 — return 400/404 instead of 500 for bad paths; add log rotation (run logs, `request_logs.csv`, pm2)
 - [x] **F4.** H3/H4 — HTML-escape file names in templates; use `FileId.file_size` instead of the self-request
 - [x] **F5.** H5/H7 — gate/limit the channel handler; make `/login` private-only (or remove it)
-- [ ] **F6.** M1–M4 — handle `touch()` duplicate-key race, friendly error on DB failure, burst-proof limits, request cooldown
-- [ ] **F7.** Commit the access system and docs once tested with a non-exempt account
+- [x] **F6.** M1–M4 — handle `touch()` duplicate-key race, friendly error on DB failure, burst-proof limits, request cooldown
+- [x] **F7.** Access system + high fixes committed and pushed (`4468ad1`)
+- [x] **F8.** Medium findings M1–M14 fixed, tested offline and checked live (not yet committed)
+- [x] **F9.** Automatic link expiry (default unlimited, per-user override, admin menu) and Low findings L1–L12 (not yet pushed)
+- [x] **F11.** Logging reorganised (info.log / error.log, `LOG_LEVEL=INFO`), old logs cleaned, duplicate users removed, unique index added
+- [ ] **F10.** Add the bot to the access group as admin so group membership checks work
 
 ## 6. Open questions for the owner
 
@@ -112,6 +116,8 @@ Taken from `git log` and the code:
 | Date | What happened |
 |---|---|
 | 2026-10-03 | Built access system (`utils/access.py`, `plugins/access_admin.py`, middleware + `stream.py` limits). |
+| 2026-10-04 | Added automatic link expiry (module `link_expiry.py`, `/admin` → Link expiry, 410 responses); new logging setup and cleanup of 51,786 old log files; fixed Low findings L1–L12; tests in `tests/test_expiry_logging_low.py`. |
+| 2026-10-03 | Fixed all Medium findings M1–M14 (atomic limits, deep-link hash, revoke command, longer hashes, cooldown, error replies); tests in `tests/test_medium_fixes.py`. |
 | 2026-10-03 | Fixed all High findings H1–H8 (range math, 416/400/403 handling, HTML escaping, channel gate, /login, group diagnostics). |
 | 2026-10-03 | Full code review; findings documented in `docs/03-code-review-findings.md` (no code changed). |
 | 2026-10-03 | Added join-request access to middleware (`start_help.py`, `database.py`); docs updated. |

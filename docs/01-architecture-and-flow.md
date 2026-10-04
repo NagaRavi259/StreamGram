@@ -50,9 +50,12 @@ streamgram/
     broadcast_helper.py  Forward-to-user with error classification
     keepalive.py         Periodic self-ping (Heroku/Railway only)
     config_parser.py     Reads MULTI_TOKEN_* env vars
-    human_readable.py / file_size.py / time_format.py   formatting helpers
+    human_readable.py / time_format.py   formatting helpers
   template/req.html, dl.html   HTML for video/audio and download pages
-utils_bot.py             Formatting helpers used by /stats (note: lives outside the package)
+utils/formatting.py      Size / duration formatting used by /stats
+  utils/access.py          Access rules, bans, history, limits, invites, access groups, revoked links
+  utils/link_expiry.py     Automatic link expiry (default + per-user lifetime)
+  utils/logging_config.py  Logging setup (info.log + error.log, rotation, levels)
 start_bot.py / run_tracemalloc.py   Alternative launchers (plain / with memory profiling)
 Procfile, app.json, process.json    Heroku / PM2 deploy descriptors
 ```
@@ -172,7 +175,7 @@ Deep link `/start inv_<token>` is handled inside the middleware so invitees with
 
 ### Access requests, admin menu, invites, limits (`bot/plugins/access_admin.py`)
 
-- **Request flow:** user taps *Request Access* → status `pending` → every owner gets a message with ✅ Approve / ❌ Reject / 🚫 Ban → the user is notified of the decision.
+- **Request flow:** user taps *Request Access* (a rejected or revoked person must wait 1 hour before asking again) → status `pending` → every owner gets a message with ✅ Approve / ❌ Reject / 🚫 Ban → the user is notified of the decision.
 - **`/admin`** (owners only) opens an inline menu:
   - *Invite a person* — by @username/ID (bot DMs an Accept button; if the DM fails you get a link to send) or a single-use 7-day link with a Share button.
   - *Users* — everyone with access, **most recently active (last bot use) first**, never-used last, paginated; people who got in only via a group appear with status `group`; open one to Revoke / Ban / Unban / set limit / see per-user history and usage counts.
@@ -180,6 +183,7 @@ Deep link `/start inv_<token>` is handled inside the middleware so invitees with
   - *Groups* — pick a chat the bot is already in (learned from membership updates and seen messages) or add by ID; remove to stop granting access.
   - *Default limit* and per-user limits; *History* of every decision.
 - **Nothing is ever posted to an access group/channel:** they are only queried with `get_chat_member` / `get_chat_join_requests`. The existing channel auto-button handler (`channel_receive_handler`) now skips access chats.
+- **Revoking a file:** `/revoke <message id>` (owners) stops serving that file everywhere; `/unrevoke <message id>` restores it. New links carry a 12-character hash; older 6-character links still work.
 - **Limits:** N links per hour / day / week / month (rolling windows), lifetime total, or unlimited. A personal limit overrides the default. Enforced in `stream.py` before a file is forwarded; usage is recorded only after links are sent. Owners and trusted users are exempt.
 
 ## 10. Data stored
@@ -215,6 +219,8 @@ Loaded from `config.env`. Values are secrets — **never commit** (`config.env` 
 | `BANNED_CHANNELS` | no | one hard-coded id | Channels the bot leaves |
 | `USER_GROUP_ID`, `TRUSTED_USERS` | see risks | 1 / – | Access-control middleware |
 | `PING_INTERVAL` | no | 1200 | Keep-alive period (Heroku only) |
+| `LOG_LEVEL` | no | INFO | DEBUG / INFO / WARNING / ERROR |
+| `LOG_LIBS_LEVEL`, `LOG_DIR`, `LOG_MAX_MB`, `LOG_BACKUPS` | no | WARNING / logs / 5 / 3 | Library log level, folder, rotation size and copies kept |
 
 ## 12. Deployment options
 
@@ -240,3 +246,33 @@ Ordered roughly by impact. None of these have been changed yet.
 12. **`stream.py`**: `m.reply_text(e)` passes an exception object; `Content-Range` header is also sent on non-range 200 responses; `except (TimeoutError, AttributeError): pass` in `yield_file` silently truncates streams (see `unknown_errors.txt`: recurring `503 Timedout upload.GetFile`).
 13. **`bool(getenv('NO_PORT', False))` / `HAS_SSL`:** any non-empty string, including `"false"` or `"0"`, evaluates to `True`.
 14. **Housekeeping:** duplicate `WORKERS` assignment; duplicate `readable_time`/`get_readable_time` helpers; `utils_bot.py` lives outside the package; sonar/coverage config are placeholders; unused `file_size.py`.
+
+## 14. Link expiry
+
+Module: `streamgram/utils/link_expiry.py` (self-contained; the rest of the code only calls `register()` when a link is created and `is_expired()` when one is opened).
+
+- **Default is unlimited.** Owners set a default lifetime for everyone and an optional personal lifetime per user in `/admin` → *Link expiry* (presets 1 h / 6 h / 1 d / 7 d / 30 d, custom such as `90m`, `12h`, `3d`, `2w`, `1d12h`, or unlimited). A personal setting overrides the default; "Use default" removes it.
+- **When it applies:** the lifetime in force when a link is created is stored with the link (collection `access_links`: message id, owner of the link, expiry time). Changing the setting later does not touch existing links; links created while the lifetime was unlimited, and all older links, never expire.
+- **What happens:** an expired link returns `410 Gone` for both the download and the watch page (only after the link's hash is verified, so nothing is revealed to guessers); the `/start <id>_<hash>` deep link reports it as invalid. The bot's reply to the user says "This link expires in …" instead of "permanent".
+- **Channels:** posts in a channel use the lifetime of the channel admin that is charged for the usage.
+- **Resilience:** answers are cached for 60 s; if the database cannot be reached the last known answer is used (or the link is treated as unlimited) so downloads do not break.
+- Expired records are kept on purpose: deleting one would make the link live again.
+
+## 15. Logging
+
+Configured once in `streamgram/utils/logging_config.py`, called from `__main__.py`; every module uses a named logger (`streamgram.<package>.<module>`), no `print()` outside the start-up banner.
+
+| File (in `logs/`) | Contents |
+|---|---|
+| `info.log` | DEBUG and INFO records (DEBUG only if `LOG_LEVEL=DEBUG`) |
+| `error.log` | WARNING, ERROR, CRITICAL (also copied to stderr at ERROR and above) |
+
+Both rotate at `LOG_MAX_MB` (default 5 MB) and keep `LOG_BACKUPS` (default 3) old copies, so the worst case is about 40 MB. Libraries (pyrogram, uvicorn, motor, …) are held at `LOG_LIBS_LEVEL` (default WARNING). Per-message database chatter is DEBUG, so at the default **INFO** level the files stay small. `logs/request_logs.csv` (every web request) is unchanged and still appended to, but no longer blocks the event loop. The old one-file-per-start `log_*.log` files are no longer created.
+
+New configuration keys: `LOG_LEVEL`, `LOG_LIBS_LEVEL`, `LOG_DIR`, `LOG_MAX_MB`, `LOG_BACKUPS`. A sanitised `config.env.example` lists every key.
+
+## 16. Housekeeping done on 2026-10-04
+
+- Deleted the 51,786 per-start run logs older than 7 days (145 MB); kept the last 7 days and all of `request_logs.csv`.
+- Trimmed the bot's pm2 output/error logs to their last 20,000 lines.
+- Removed 8 duplicate rows from the `users` collection (they only held a join date) and created the unique index on `users.id`; the removed rows were saved to a backup file first.
