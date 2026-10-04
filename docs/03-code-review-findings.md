@@ -139,7 +139,7 @@ Regression tests: `tests/test_medium_fixes.py` (run together with `tests/test_hi
 
 | ID | Result |
 |---|---|
-| L1 | Fixed. Fixed-name rotating `info.log` / `error.log` with size limits replace one file per start; level from `LOG_LEVEL` (INFO); old run logs older than a week deleted; pm2 logs trimmed; the request CSV is kept and no longer written on the event loop. |
+| L1 | Fixed. Fixed-name rotating `info.log` / `error.log` with size limits replace one file per start; level from `LOG_LEVEL` (INFO); old run logs older than a week deleted; pm2 logs trimmed; the request CSV is kept, no longer written on the event loop, and rotates monthly into `request_logs_YYYY-MM.csv` (nothing deleted). |
 | L2 | Fixed. `UPDATES_CHANNEL` is `None` when unset / blank / "none"; all checks use truthiness. |
 | L3 | Fixed. `HAS_SSL`, `NO_PORT` accept true/false/1/0/yes/no/on/off; duplicate `WORKERS` removed. |
 | L4 | Fixed. One shared Mongo client and one `Database` per name (`Database.shared`); unique index on `users.id` (8 duplicate rows removed first). |

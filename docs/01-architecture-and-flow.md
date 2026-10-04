@@ -267,7 +267,7 @@ Configured once in `streamgram/utils/logging_config.py`, called from `__main__.p
 | `info.log` | DEBUG and INFO records (DEBUG only if `LOG_LEVEL=DEBUG`) |
 | `error.log` | WARNING, ERROR, CRITICAL (also copied to stderr at ERROR and above) |
 
-Both rotate at `LOG_MAX_MB` (default 5 MB) and keep `LOG_BACKUPS` (default 3) old copies, so the worst case is about 40 MB. Libraries (pyrogram, uvicorn, motor, …) are held at `LOG_LIBS_LEVEL` (default WARNING). Per-message database chatter is DEBUG, so at the default **INFO** level the files stay small. `logs/request_logs.csv` (every web request) is unchanged and still appended to, but no longer blocks the event loop. The old one-file-per-start `log_*.log` files are no longer created.
+Both rotate at `LOG_MAX_MB` (default 5 MB) and keep `LOG_BACKUPS` (default 3) old copies, so the worst case is about 40 MB. Libraries (pyrogram, uvicorn, motor, …) are held at `LOG_LIBS_LEVEL` (default WARNING). Per-message database chatter is DEBUG, so at the default **INFO** level the files stay small. The request log (`<LOG_DIR>/request_logs.csv`, one row per web request) rotates **monthly**: the current month stays in `request_logs.csv`, and on the first request of a new month it is renamed to `request_logs_YYYY-MM.csv` and a fresh file with a header is started. Nothing is deleted. It is written from a worker thread so the event loop is never blocked, and a failure to write never fails the request. Implementation: `streamgram/utils/request_log.py`. The old one-file-per-start `log_*.log` files are no longer created.
 
 New configuration keys: `LOG_LEVEL`, `LOG_LIBS_LEVEL`, `LOG_DIR`, `LOG_MAX_MB`, `LOG_BACKUPS`. A sanitised `config.env.example` lists every key.
 
@@ -276,3 +276,4 @@ New configuration keys: `LOG_LEVEL`, `LOG_LIBS_LEVEL`, `LOG_DIR`, `LOG_MAX_MB`, 
 - Deleted the 51,786 per-start run logs older than 7 days (145 MB); kept the last 7 days and all of `request_logs.csv`.
 - Trimmed the bot's pm2 output/error logs to their last 20,000 lines.
 - Removed 8 duplicate rows from the `users` collection (they only held a join date) and created the unique index on `users.id`; the removed rows were saved to a backup file first.
+- Split the old 59 MB request log into 16 monthly files plus the current month (692,656 rows; every closed month was checked against the row counts taken before the split). The tests had briefly appended 322 rows of their own to the live file; those rows (IP `testclient`) were removed, and the tests now write only to a temporary folder.

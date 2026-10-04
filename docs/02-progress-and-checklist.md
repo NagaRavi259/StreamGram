@@ -101,6 +101,7 @@ Taken from `git log` and the code:
 - [x] **F8.** Medium findings M1–M14 fixed, tested offline and checked live (not yet committed)
 - [x] **F9.** Automatic link expiry (default unlimited, per-user override, admin menu) and Low findings L1–L12 (not yet pushed)
 - [x] **F11.** Logging reorganised (info.log / error.log, `LOG_LEVEL=INFO`), old logs cleaned, duplicate users removed, unique index added
+- [x] **F12.** Request CSV rotates monthly, history preserved
 - [ ] **F10.** Add the bot to the access group as admin so group membership checks work
 
 ## 6. Open questions for the owner
@@ -116,6 +117,7 @@ Taken from `git log` and the code:
 | Date | What happened |
 |---|---|
 | 2026-10-03 | Built access system (`utils/access.py`, `plugins/access_admin.py`, middleware + `stream.py` limits). |
+| 2026-10-04 | Monthly rotation of the request CSV (`utils/request_log.py`), old history split into monthly files, test rows removed from the live file, tests isolated from the real logs. |
 | 2026-10-04 | Added automatic link expiry (module `link_expiry.py`, `/admin` → Link expiry, 410 responses); new logging setup and cleanup of 51,786 old log files; fixed Low findings L1–L12; tests in `tests/test_expiry_logging_low.py`. |
 | 2026-10-03 | Fixed all Medium findings M1–M14 (atomic limits, deep-link hash, revoke command, longer hashes, cooldown, error replies); tests in `tests/test_medium_fixes.py`. |
 | 2026-10-03 | Fixed all High findings H1–H8 (range math, 416/400/403 handling, HTML escaping, channel gate, /login, group diagnostics). |
