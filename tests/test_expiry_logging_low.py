@@ -18,6 +18,8 @@ sys.path.insert(0, ROOT)
 sys.path.insert(0, os.path.join(ROOT, "tests"))
 from _shared import LOOP, Recorder, install_fakes, quiet_database, user  # noqa: E402
 
+import tempfile as _tempfile
+os.environ["LOG_DIR"] = _tempfile.mkdtemp(prefix="ftl-test-logs-")  # tests never write to the real logs/
 os.environ.update(API_ID="1", API_HASH="x", BOT_TOKEN="1:x", BIN_CHANNEL="-100", OWNER_ID="111", TRUSTED_USERS="222",
                   USER_GROUP_ID="-1005", MONGO_SCHEMA="mongodb", MONGO_HOST="127.0.0.1", MONGO_USERNAME="u",
                   MONGO_PASSWORD="p", FQDN="example.com")
@@ -278,14 +280,14 @@ async def main():
     page = await rt.render_page(8, UID[:12]); assert "<audio" in page and "__MEDIA__" not in page
     # request log: still written, to the same CSV, without blocking
     import csv
-    log = os.path.join(tempfile.mkdtemp(), "requests.csv"); real = streamgram.server.log_file_path
-    streamgram.server.log_file_path = log
+    log = os.path.join(tempfile.mkdtemp(), "requests.csv"); real = streamgram.server.request_log.path
+    streamgram.server.request_log.path = log
     try:
         tc.get("/probe-path"); tc.get("/other")
     finally:
-        streamgram.server.log_file_path = real
+        streamgram.server.request_log.path = real
     rows = list(csv.reader(open(log)))
-    assert len(rows) == 2 and rows[0][2].endswith("/probe-path") and len(rows[0]) == 3
+    assert rows[0] == ["Timestamp", "IP Address", "Endpoint"] and len(rows) == 3 and rows[1][2].endswith("/probe-path") and len(rows[1]) == 3
     print("low ok: shared DB, login token, /stats owner-only, formatting module, requirements, stale menus, template, request CSV")
 
 

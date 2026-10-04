@@ -13,6 +13,8 @@ import asyncio, random, types
 sys.path.insert(0, ROOT)
 sys.path.insert(0, os.path.join(ROOT, "tests"))
 from _shared import LOOP  # noqa: E402
+import tempfile as _tempfile
+os.environ["LOG_DIR"] = _tempfile.mkdtemp(prefix="ftl-test-logs-")  # tests never write to the real logs/
 os.environ.update(API_ID="1", API_HASH="x", BOT_TOKEN="1:x", BIN_CHANNEL="-100", OWNER_ID="111", TRUSTED_USERS="222",
                   USER_GROUP_ID="-1005", MONGO_SCHEMA="mongodb", MONGO_HOST="127.0.0.1", MONGO_USERNAME="u", MONGO_PASSWORD="p",
                   FQDN="example.com")
