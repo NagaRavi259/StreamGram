@@ -1,0 +1,13 @@
+.git
+.github
+__pycache__
+*.pyc
+.pytest_cache
+logs/
+*.session
+*.session-journal
+config.env
+docs/
+tests/
+.venv
+venv/

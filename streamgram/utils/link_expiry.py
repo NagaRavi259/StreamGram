@@ -37,12 +37,16 @@ def parse_duration(text: str) -> int:
         total += int(m.group(1)) * _UNITS[m.group(2)]
         pos = m.end()
     if not cleaned or pos != len(cleaned) or total <= 0 or total > MAX_SECONDS:
+        logger.debug("parse_duration(%r): could not parse", text)
         raise ValueError("Use a number with a unit, e.g. 30m, 12h, 3d, 2w (or 1d12h)")
+    logger.debug("parse_duration(%r) -> %ss", text, total)
     return total
 
 
 def format_ttl(seconds) -> str:
-    return "unlimited" if seconds is None else fmt_duration(seconds)
+    result = "unlimited" if seconds is None else fmt_duration(seconds)
+    logger.debug("format_ttl(%s) -> %r", seconds, result)
+    return result
 
 
 class LinkExpiry:
@@ -59,9 +63,12 @@ class LinkExpiry:
     # ---- settings
     async def get_default(self):
         doc = await self.settings.find_one({"_id": "link_ttl"})
-        return doc.get("seconds") if doc else None
+        seconds = doc.get("seconds") if doc else None
+        logger.debug("get_default() -> %s", seconds)
+        return seconds
 
     async def set_default(self, seconds):
+        logger.info("set_default(%s)", seconds)
         await self.settings.update_one({"_id": "link_ttl"}, {"$set": {"seconds": seconds}}, upsert=True)
 
     async def get_personal(self, uid):
@@ -72,20 +79,25 @@ class LinkExpiry:
         return False, None
 
     async def set_personal(self, uid, seconds):
+        logger.info("set_personal(%s, %s)", uid, seconds)
         await self.users.update_one(
             {"id": int(uid)}, {"$set": {"link_ttl": {"seconds": seconds}}, "$setOnInsert": {"created_at": int(time.time())}},
             upsert=True,
         )
 
     async def clear_personal(self, uid):
+        logger.info("clear_personal(%s): back to the default lifetime", uid)
         await self.users.update_one({"id": int(uid)}, {"$unset": {"link_ttl": ""}})
 
     async def effective(self, uid):
         """(seconds_or_None, source) where source is 'personal' or 'default'."""
         personal, seconds = await self.get_personal(uid)
         if personal:
+            logger.debug("effective(%s) -> %s (personal)", uid, seconds)
             return seconds, "personal"
-        return await self.get_default(), "default"
+        seconds = await self.get_default()
+        logger.debug("effective(%s) -> %s (default)", uid, seconds)
+        return seconds, "default"
 
     # ---- links
     async def register(self, msg_id, uid):
@@ -108,6 +120,7 @@ class LinkExpiry:
         msg_id = int(msg_id)
         hit = self._cache.get(msg_id)
         if hit and time.time() - hit[0] < self.CACHE_SECONDS:
+            logger.debug("expires_at(%s): cache hit -> %s", msg_id, hit[1])
             return hit[1]
         try:
             rec = await self.links.find_one({"msg_id": msg_id}, {"expires_at": 1})
@@ -120,13 +133,18 @@ class LinkExpiry:
             return known
         expires_at = rec.get("expires_at") if rec else None
         if len(self._cache) > 10000:
+            logger.debug("expires_at: cache grew past 10000 entries, clearing it")
             self._cache.clear()
         self._cache[msg_id] = (time.time(), expires_at)
+        logger.debug("expires_at(%s) -> %s", msg_id, expires_at)
         return expires_at
 
     async def is_expired(self, msg_id) -> bool:
         expires_at = await self.expires_at(msg_id)
-        return expires_at is not None and time.time() >= expires_at
+        expired = expires_at is not None and time.time() >= expires_at
+        if expired:
+            logger.info("is_expired(%s): link has expired", msg_id)
+        return expired
 
 
 link_expiry = LinkExpiry(access_db)

@@ -1,11 +1,18 @@
 # (c) adarsh-goel
+import logging
 import os
 from os import getenv, environ
 from dotenv import load_dotenv
 from urllib.parse import quote_plus
 
+# This module runs before streamgram.utils.logging_config.setup_logging(), so anything logged here
+# below WARNING is invisible until a handler is attached later (Python's "handler of last
+# resort" only prints WARNING+). That's fine: this is exactly the startup-sanity-check case.
+logger = logging.getLogger("streamgram.vars")
+
 env_path = "config.env"
 
+logger.debug("Loading config from %s (falls back to real environment variables if absent)", env_path)
 load_dotenv(dotenv_path=env_path)
 
 def _env_bool(name, default=False):
@@ -32,13 +39,15 @@ class Var(object):
     BIND_ADRESS = str(getenv('WEB_SERVER_BIND_ADDRESS', '0.0.0.0'))
     PING_INTERVAL = int(environ.get("PING_INTERVAL", "1200"))  # 20 minutes
     OWNER_ID = set(int(x) for x in os.environ.get("OWNER_ID", "").replace(',', ' ').split())
+    if not OWNER_ID:
+        logger.warning("OWNER_ID is empty: nobody is exempt from access checks and admin commands are unreachable.")
     NO_PORT = _env_bool('NO_PORT')
     APP_NAME = None
     OWNER_USERNAME = str(getenv('OWNER_USERNAME'))
     if 'DYNO' in environ:
         ON_HEROKU = True
         APP_NAME = str(getenv('APP_NAME'))
-
+        logger.info("Running on Heroku/Railway (DYNO set): keep-alive pinging is enabled.")
     else:
         ON_HEROKU = False
     FQDN = str(getenv('FQDN', BIND_ADRESS)) if not ON_HEROKU or getenv('FQDN') else APP_NAME+'.railway.app'
@@ -47,8 +56,10 @@ class Var(object):
         URL = "https://{}/".format(FQDN)
     else:
         URL = "http://{}/".format(FQDN)
+    logger.debug("Public URL resolved to %s", URL)
     WORKERS = int(getenv('WORKERS', 3))
     MY_PASS = _env_text('MY_PASS')
+    logger.info("Password login (/login) is %s", "ENABLED" if MY_PASS else "disabled (MY_PASS unset)")
 
     ## database connection detials
     # DATABASE_URL = str(getenv('DATABASE_URL'))
@@ -64,6 +75,13 @@ class Var(object):
     # ids separated by spaces and/or commas; blank or unset means nobody
     TRUSTED_USERS = set(int(u) for u in (getenv('TRUSTED_USERS') or '').replace(',', ' ').split())
     USER_GROUP_ID = int(getenv('USER_GROUP_ID', 1))
+    if USER_GROUP_ID >= 0:
+        logger.warning(
+            "USER_GROUP_ID (%s) is not a negative chat id: no access group is configured, "
+            "so only OWNER_ID/TRUSTED_USERS and explicitly approved users get in.", USER_GROUP_ID
+        )
+    else:
+        logger.info("Access group configured: USER_GROUP_ID=%s", USER_GROUP_ID)
 
     # logging (see streamgram/utils/logging_config.py)
     LOG_LEVEL = str(getenv('LOG_LEVEL', 'INFO'))            # DEBUG, INFO, WARNING, ERROR
@@ -71,3 +89,7 @@ class Var(object):
     LOG_DIR = str(getenv('LOG_DIR', 'logs'))
     LOG_MAX_MB = int(getenv('LOG_MAX_MB', 5))               # size of each log file before it rotates
     LOG_BACKUPS = int(getenv('LOG_BACKUPS', 3))             # rotated copies kept per file
+    logger.debug(
+        "Config loaded: name=%s PORT=%s BIND=%s ON_HEROKU=%s LOG_LEVEL=%s",
+        name, PORT, BIND_ADRESS, ON_HEROKU, LOG_LEVEL,
+    )

@@ -262,8 +262,10 @@ async def main():
     src = read(os.path.join(ROOT, "streamgram/bot/plugins/extra.py"))
     assert "filters.command(['stats', 'status'])" in src and "filters.user(list(Var.OWNER_ID))" in src
     upd = Recorder(); await extra.stats(None, upd); assert "Bot Uptime" in upd.sent[0][0]
-    from streamgram.utils.formatting import readable_time, get_readable_file_size
-    assert readable_time(3725) == "1h2m5s" and get_readable_file_size(2048) == "2.0KB" and get_readable_file_size(None) == "0B"
+    # E3: the separate formatting.py duplicates (readable_time/get_readable_file_size) are gone;
+    # /stats now reuses the same humanbytes/get_readable_time as the rest of the app.
+    assert "from streamgram.utils.human_readable import humanbytes" in src and "from streamgram.utils.time_format import get_readable_time" in src
+    assert not os.path.exists(os.path.join(ROOT, "streamgram/utils/formatting.py"))
     assert not os.path.exists(os.path.join(ROOT, "utils_bot.py")) and not os.path.exists(os.path.join(ROOT, "streamgram/utils/file_size.py"))
     # L8 requirements
     req = read(os.path.join(ROOT, "requirements.txt")).lower().split()

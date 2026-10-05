@@ -15,16 +15,21 @@ def get_client():
     """One Motor client for the whole process, shared by every Database / AccessDB."""
     global _client
     if _client is None:
+        logger.debug("Creating the shared Motor client (schema=%s, host=%s)", Var.MONGO_SCHEMA, Var.MONGO_HOST)
         _client = motor.motor_asyncio.AsyncIOMotorClient(get_mongo_uri())
+    else:
+        logger.debug("Reusing the shared Motor client")
     return _client
 
 
 def get_mongo_uri() -> str:
     """Builds and returns the MongoDB connection URI from environment variables."""
+    # Never log the full URI: it embeds MONGO_USERNAME/MONGO_PASSWORD.
     if Var.MONGO_SCHEMA == "mongodb+srv":
         uri = f"{Var.MONGO_SCHEMA}://{Var.MONGO_USERNAME}:{Var.MONGO_PASSWORD}@{Var.MONGO_HOST}/?retryWrites=true&w=majority&tls=true"
     else:
         uri = f"{Var.MONGO_SCHEMA}://{Var.MONGO_USERNAME}:{Var.MONGO_PASSWORD}@{Var.MONGO_HOST}:{Var.MONGO_PORT}/"
+    logger.debug("Built Mongo URI (schema=%s, host=%s, credentials redacted)", Var.MONGO_SCHEMA, Var.MONGO_HOST)
     return uri
 
 class Database:
@@ -35,6 +40,7 @@ class Database:
         """One Database per name for the whole process. The first call schedules the connection check."""
         inst = cls._instances.get(database_name)
         if inst is None:
+            logger.debug("Creating a new Database instance for %r", database_name)
             inst = cls._instances[database_name] = cls(get_mongo_uri(), database_name)
             try:
                 task = asyncio.get_event_loop().create_task(inst.initialize())

@@ -35,6 +35,7 @@ class RequestLog:
     def _file_month(self):
         """Newest month (YYYY-MM) seen near the end of the current file, or None if it has no rows."""
         if self._cached[0] == self.path and self._cached[1]:
+            logger.debug("_file_month: cache hit -> %s", self._cached[1])
             return self._cached[1]
         month = None
         if os.path.exists(self.path):
@@ -44,6 +45,7 @@ class RequestLog:
                 found = re.findall(rb"(?m)^(\d{4}-\d{2})-\d{2}T", f.read())
             month = max(found).decode() if found else None  # newest month, so a late row cannot mislabel the file
         self._cached = (self.path, month)
+        logger.debug("_file_month: scanned -> %s", month)
         return month
 
     def _archive_current(self, month):
@@ -67,6 +69,9 @@ class RequestLog:
             if not os.path.exists(self.path) or os.path.getsize(self.path) == 0:
                 with open(self.path, "w", newline="", encoding="utf-8") as f:
                     csv.writer(f).writerow(HEADER)
+                logger.info("Created a fresh request log at %s", self.path)
+            else:
+                logger.debug("Request log already exists at %s", self.path)
 
     def append(self, row):
         """Add one request. `row[0]` is the ISO timestamp; a new month rotates the file first."""
@@ -77,6 +82,7 @@ class RequestLog:
             if exists:
                 file_month = self._file_month()
                 if file_month and month > file_month:
+                    logger.info("New month detected (%s -> %s): rotating the request log", file_month, month)
                     self._archive_current(file_month)
                     exists = False
             with open(self.path, "a", newline="", encoding="utf-8") as f:
@@ -85,11 +91,13 @@ class RequestLog:
                     writer.writerow(HEADER)
                 writer.writerow(row)
             self._cached = (self.path, month if not exists else (self._cached[1] or month))
+            logger.debug("Request log row appended (%s)", month)
 
     def migrate(self):
         """Split an old multi-month file into monthly files. Returns {month: rows} (empty if nothing to do)."""
         with self._lock:
             if not os.path.exists(self.path):
+                logger.debug("migrate: no request log at %s, nothing to do", self.path)
                 return {}
             months = []
             with open(self.path, "rb") as f:
@@ -100,6 +108,7 @@ class RequestLog:
                         months.append(m.group(1).decode())
             distinct = sorted(set(months))
             if len(distinct) <= 1:
+                logger.debug("migrate: only %d month(s) present, nothing to split", len(distinct))
                 return {}
             newest, counts, outs = distinct[-1], {}, {}
             tmp = lambda month: f"{self.archive_path(month)}.part"

@@ -22,7 +22,9 @@ def to_level(value, default=logging.INFO) -> int:
     if isinstance(value, int):
         return value
     level = logging.getLevelName(str(value).strip().upper())
-    return level if isinstance(level, int) else default
+    result = level if isinstance(level, int) else default
+    logging.getLogger("streamgram.utils.logging_config").debug("to_level(%r) -> %s", value, result)
+    return result
 
 
 def setup_logging(level="INFO", log_dir="logs", max_bytes=5 * 1024 * 1024, backups=3, libs_level="WARNING"):
@@ -55,4 +57,9 @@ def setup_logging(level="INFO", log_dir="logs", max_bytes=5 * 1024 * 1024, backu
     lib_no = max(to_level(libs_level, logging.WARNING), level_no if level_no > logging.WARNING else 0)
     for name in LIBRARIES:
         logging.getLogger(name).setLevel(lib_no)
+    # Handlers are attached above, so this is the first record that actually lands in the files.
+    root.info(
+        "Logging configured: level=%s dir=%s max_bytes=%s backups=%s libs_level=%s",
+        logging.getLevelName(level_no), log_dir, max_bytes, backups, logging.getLevelName(lib_no),
+    )
     return root

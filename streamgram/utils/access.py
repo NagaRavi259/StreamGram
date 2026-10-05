@@ -38,10 +38,13 @@ MEMBER_STATUSES = (
 
 def is_exempt(user_id: int) -> bool:
     """Owners and TRUSTED_USERS bypass access checks and limits."""
-    return user_id in Var.OWNER_ID or user_id in Var.TRUSTED_USERS
+    exempt = user_id in Var.OWNER_ID or user_id in Var.TRUSTED_USERS
+    logger.debug("is_exempt(%s) -> %s", user_id, exempt)
+    return exempt
 
 
 def profile_of(user) -> dict:
+    logger.debug("profile_of(%s)", getattr(user, "id", "?"))
     return {
         "first_name": user.first_name or "",
         "username": user.username or "",
@@ -50,10 +53,13 @@ def profile_of(user) -> dict:
 
 def describe_quota(period, limit) -> str:
     if not period or period == "unlimited" or limit is None:
-        return "unlimited"
-    if period == "life":
-        return f"{limit} total (lifetime)"
-    return f"{limit} per {period}"
+        result = "unlimited"
+    elif period == "life":
+        result = f"{limit} total (lifetime)"
+    else:
+        result = f"{limit} per {period}"
+    logger.debug("describe_quota(%s, %s) -> %r", period, limit, result)
+    return result
 
 
 def fmt_duration(seconds: int) -> str:
@@ -63,7 +69,9 @@ def fmt_duration(seconds: int) -> str:
     m, s = divmod(r, 60)
     parts = [f"{d}d" if d else "", f"{h}h" if h else "", f"{m}m" if m else ""]
     out = " ".join(p for p in parts if p)
-    return out or f"{s}s"
+    result = out or f"{s}s"
+    logger.debug("fmt_duration(%s) -> %r", seconds, result)
+    return result
 
 
 class AccessDB:
@@ -79,6 +87,7 @@ class AccessDB:
         self.join_requests = db.join_requests
         self.revoked = db.access_revoked
         self.links = db.access_links
+        self.link_tokens = db.access_link_tokens
         self._group_cache = {"ts": 0, "ids": []}
         self._status_cache = {}
         self._touched = {}
@@ -92,14 +101,18 @@ class AccessDB:
             await self.usage.create_index([("uid", 1), ("ts", -1)])
             await self.history.create_index([("ts", -1)])
             await self.invites.create_index("token", unique=True)
+            await self.link_tokens.create_index("msg_id", unique=True)
+            logger.info("AccessDB indexes ready")
         except Exception as e:
             logger.error(f"AccessDB index creation failed: {e}")
 
     # ---------------- users ----------------
     async def get_user(self, uid):
+        logger.debug("get_user(%s)", uid)
         return await self.users.find_one({"id": int(uid)})
 
     async def set_status(self, uid, status, by=0, profile=None, source=None, note=""):
+        logger.info("set_status: user %s -> %s (by=%s, source=%s, note=%r)", uid, status, by, source, note)
         now = int(time.time())
         fields = {"status": status, "updated_at": now}
         if profile:
@@ -122,6 +135,7 @@ class AccessDB:
 
     async def list_users(self, statuses, skip=0, limit=8, sort_field="last_used"):
         """statuses: list of status values. Newest `sort_field` first; never-used entries last."""
+        logger.debug("list_users(statuses=%s, skip=%s, limit=%s, sort_field=%s)", statuses, skip, limit, sort_field)
         cur = (
             self.users.find({"status": {"$in": list(statuses)}})
             .sort([(sort_field, -1), ("granted_at", -1)])
@@ -130,7 +144,9 @@ class AccessDB:
         return await cur.to_list(limit)
 
     async def count_users(self, statuses):
-        return await self.users.count_documents({"status": {"$in": list(statuses)}})
+        count = await self.users.count_documents({"status": {"$in": list(statuses)}})
+        logger.debug("count_users(%s) -> %s", statuses, count)
+        return count
 
     async def touch(self, user):
         """Record that an allowed user just used the bot (throttled to one write per minute).
@@ -140,6 +156,7 @@ class AccessDB:
         """
         now = time.time()
         if now - self._touched.get(user.id, 0) < 60:
+            logger.debug("touch(%s): throttled, skipping write", user.id)
             return
         self._touched[user.id] = now
         rec = await self.users.find_one({"id": user.id}, {"status": 1})
@@ -150,15 +167,19 @@ class AccessDB:
                     {"id": user.id, "status": "group", "source": "group", "created_at": int(now),
                      "updated_at": int(now), **fields}
                 )
+                logger.debug("touch(%s): created a new 'group' record", user.id)
             except DuplicateKeyError:  # another message from the same person won the race
+                logger.debug("touch(%s): lost an insert race, updating instead", user.id)
                 await self.users.update_one({"id": user.id}, {"$set": fields})
         else:
             if rec.get("status") not in ("approved", "group", "banned"):
                 fields.update(status="group", source="group", updated_at=int(now))
+                logger.debug("touch(%s): status %s -> group", user.id, rec.get("status"))
             await self.users.update_one({"id": user.id}, {"$set": fields})
 
     # ---------------- history ----------------
     async def log(self, uid, action, by=0, note=""):
+        logger.debug("log: uid=%s action=%s by=%s note=%r", uid, action, by, note)
         rec = await self.users.find_one({"id": int(uid)}, {"first_name": 1, "username": 1})
         name = ""
         if rec:
@@ -170,11 +191,14 @@ class AccessDB:
     async def get_history(self, skip=0, limit=10, uid=None):
         q = {"uid": int(uid)} if uid else {}
         cur = self.history.find(q).sort("ts", -1).skip(skip).limit(limit)
-        return await cur.to_list(limit), await self.history.count_documents(q)
+        items, total = await cur.to_list(limit), await self.history.count_documents(q)
+        logger.debug("get_history(uid=%s, skip=%s, limit=%s) -> %s of %s", uid, skip, limit, len(items), total)
+        return items, total
 
     # ---------------- limits ----------------
     async def set_user_quota(self, uid, period, limit):
         """period=None clears the personal limit (falls back to the default)."""
+        logger.info("set_user_quota(%s, period=%s, limit=%s)", uid, period, limit)
         if period is None:
             await self.users.update_one({"id": int(uid)}, {"$unset": {"quota": ""}})
         else:
@@ -183,6 +207,7 @@ class AccessDB:
             )
 
     async def set_default_quota(self, period, limit):
+        logger.info("set_default_quota(period=%s, limit=%s)", period, limit)
         await self.settings.update_one(
             {"_id": "quota"}, {"$set": {"period": period, "limit": limit}}, upsert=True
         )
@@ -210,10 +235,12 @@ class AccessDB:
         async with lock:
             ok, msg = await self.check_quota(uid)
             if not ok:
+                logger.info("reserve(%s): blocked - %s", uid, msg)
                 return False, msg, None
             now = int(time.time())
             res = await self.usage.insert_one({"uid": int(uid), "ts": now})
             await self.users.update_one({"id": int(uid)}, {"$set": {"last_used": now}})
+            logger.debug("reserve(%s): granted, usage id %s", uid, res.inserted_id)
             return True, None, res.inserted_id
 
     async def refund(self, token):
@@ -221,12 +248,15 @@ class AccessDB:
             return
         try:
             await self.usage.delete_one({"_id": token})
+            logger.debug("refund(%s): usage slot given back", token)
         except Exception as e:
             logger.error(f"Could not refund usage {token}: {e}")
 
     async def count_usage(self, uid, period):
         since = 0 if period == "life" else int(time.time()) - PERIODS[period]
-        return await self.usage.count_documents({"uid": int(uid), "ts": {"$gte": since}})
+        count = await self.usage.count_documents({"uid": int(uid), "ts": {"$gte": since}})
+        logger.debug("count_usage(%s, %s) -> %s", uid, period, count)
+        return count
 
     async def check_quota(self, uid):
         """Returns (allowed, message_if_blocked)."""
@@ -239,6 +269,7 @@ class AccessDB:
         if used < limit:
             return True, None
         if period == "life":
+            logger.info("check_quota(%s): lifetime limit of %s reached", uid, limit)
             return False, f"⛔ You have used all {limit} of your links. Contact the admin for more."
         since = int(time.time()) - PERIODS[period]
         docs = await (
@@ -246,6 +277,7 @@ class AccessDB:
             .sort("ts", 1).skip(used - limit).limit(1).to_list(1)
         )
         wait = docs[0]["ts"] + PERIODS[period] - int(time.time()) if docs else PERIODS[period]
+        logger.info("check_quota(%s): %s/%s per %s reached, retry in %ss", uid, used, limit, period, wait)
         return False, (
             f"⛔ Limit reached: {limit} link(s) per {period}.\n"
             f"Try again in about {fmt_duration(wait)}."
@@ -253,6 +285,7 @@ class AccessDB:
 
     # ---------------- access groups ----------------
     async def note_chat(self, chat, enabled=None):
+        logger.debug("note_chat(%s, enabled=%s)", chat.id, enabled)
         fields = {"title": chat.title or str(chat.id), "type": str(chat.type.name).lower(), "seen_at": int(time.time())}
         upd = {"$set": fields, "$setOnInsert": {"enabled": False}}
         if enabled is not None:
@@ -261,10 +294,12 @@ class AccessDB:
         self._group_cache["ts"] = 0
 
     async def forget_chat(self, chat_id):
+        logger.info("forget_chat(%s): the bot left or was removed", chat_id)
         await self.chats.delete_one({"chat_id": chat_id})
         self._group_cache["ts"] = 0
 
     async def set_chat_enabled(self, chat_id, enabled):
+        logger.info("set_chat_enabled(%s, %s)", chat_id, enabled)
         await self.chats.update_one({"chat_id": chat_id}, {"$set": {"enabled": enabled}})
         self._group_cache["ts"] = 0
 
@@ -280,16 +315,19 @@ class AccessDB:
             if c["chat_id"] not in ids:
                 ids.append(c["chat_id"])
         self._group_cache = {"ts": time.time(), "ids": ids}
+        logger.debug("group_ids: refreshed cache -> %s", ids)
         return ids
 
     async def chat_status(self, client, chat_id, uid):
         """ChatMemberStatus of uid in chat_id, or None. Positive results cached for 60s."""
         hit = self._status_cache.get((chat_id, uid))
         if hit and time.time() - hit[0] < 60:
+            logger.debug("chat_status(%s, %s): cache hit -> %s", chat_id, uid, hit[1])
             return hit[1]
         try:
             status = (await client.get_chat_member(chat_id, uid)).status
         except UserNotParticipant:
+            logger.debug("chat_status(%s, %s): not a participant", chat_id, uid)
             return None
         except PeerIdInvalid:
             # Users who message the bot are always known to it, so this means the bot cannot see the chat.
@@ -305,18 +343,22 @@ class AccessDB:
             return None
         if status in MEMBER_STATUSES:
             self._status_cache[(chat_id, uid)] = (time.time(), status)
+        logger.debug("chat_status(%s, %s) -> %s", chat_id, uid, status)
         return status
 
     async def chat_visibility(self, client, chat_id):
         """(ok, detail): can the bot see this chat, and in what role? Used by the admin menu."""
         try:
             me = await client.get_chat_member(chat_id, "me")
+            logger.debug("chat_visibility(%s): bot is %s", chat_id, me.status.name.lower())
             return True, me.status.name.lower()
         except Exception as e:
+            logger.debug("chat_visibility(%s): can't see this chat (%s)", chat_id, type(e).__name__)
             return False, type(e).__name__
 
     # ---------------- join requests ----------------
     async def add_join_request(self, uid):
+        logger.info("add_join_request(%s)", uid)
         await self.join_requests.update_one(
             {"id": int(uid)},
             {"$set": {"id": int(uid), "requested_on": int(time.time())}},
@@ -324,13 +366,17 @@ class AccessDB:
         )
 
     async def has_join_request(self, uid):
-        return bool(await self.join_requests.find_one({"id": int(uid)}))
+        found = bool(await self.join_requests.find_one({"id": int(uid)}))
+        logger.debug("has_join_request(%s) -> %s", uid, found)
+        return found
 
     async def remove_join_request(self, uid):
+        logger.debug("remove_join_request(%s)", uid)
         await self.join_requests.delete_many({"id": int(uid)})
 
     # ---------------- revoked links ----------------
     async def set_revoked(self, msg_id, revoked=True):
+        logger.info("set_revoked(%s, revoked=%s)", msg_id, revoked)
         if revoked:
             await self.revoked.update_one({"msg_id": int(msg_id)}, {"$set": {"msg_id": int(msg_id), "ts": int(time.time())}}, upsert=True)
         else:
@@ -356,6 +402,7 @@ class AccessDB:
             {"token": token, "by": int(by), "target_id": target_id, "used": False,
              "created_at": int(time.time()), "expires_at": int(time.time()) + INVITE_TTL}
         )
+        logger.info("create_invite: by=%s target_id=%s", by, target_id)
         return token
 
     async def redeem_invite(self, token, uid):
@@ -363,12 +410,16 @@ class AccessDB:
         now = int(time.time())
         inv = await self.invites.find_one({"token": token})
         if not inv or inv["used"] or inv["expires_at"] < now:
+            logger.info("redeem_invite(%s, %s): invalid, already used or expired", token, uid)
             return None
         if inv.get("target_id") and inv["target_id"] != uid:
+            logger.warning("redeem_invite(%s, %s): token is reserved for a different user (%s)", token, uid, inv["target_id"])
             return None
-        return await self.invites.find_one_and_update(
+        result = await self.invites.find_one_and_update(
             {"token": token, "used": False}, {"$set": {"used": True, "used_by": int(uid), "used_at": now}}
         )
+        logger.info("redeem_invite(%s, %s): %s", token, uid, "redeemed" if result else "lost the race to another redeemer")
+        return result
 
 
 access_db = AccessDB()
@@ -381,10 +432,12 @@ async def group_access(client, user_id):
     for chat_id in await access_db.group_ids():
         status = await access_db.chat_status(client, chat_id, user_id)
         if status in MEMBER_STATUSES:
+            logger.debug("group_access(%s): member of %s", user_id, chat_id)
             return True
         if status == enums.ChatMemberStatus.BANNED:
             banned_in_group = True
     if banned_in_group:
+        logger.info("group_access(%s): banned in an access group, dropping any join request", user_id)
         await access_db.remove_join_request(user_id)
         return False
     return await access_db.has_join_request(user_id)
@@ -396,15 +449,21 @@ async def has_access(client, user_id):
     Order: owners/trusted -> explicit ban -> explicitly approved -> access group / join request.
     """
     if is_exempt(user_id):
+        logger.debug("has_access(%s): exempt (owner/trusted)", user_id)
         return True, None
     rec = await access_db.get_user(user_id)
     if rec and rec.get("status") == "banned":
+        logger.debug("has_access(%s): banned", user_id)
         return False, "banned"
     if rec and rec.get("status") == "approved":
+        logger.debug("has_access(%s): approved", user_id)
         return True, None
     if await group_access(client, user_id):
+        logger.debug("has_access(%s): allowed via access group / join request", user_id)
         return True, None
-    return False, "pending" if rec and rec.get("status") == "pending" else "denied"
+    reason = "pending" if rec and rec.get("status") == "pending" else "denied"
+    logger.debug("has_access(%s): %s", user_id, reason)
+    return False, reason
 
 
 async def notify_owners(client, text, markup=None):
@@ -428,6 +487,7 @@ async def channel_sponsor(client, chat_id):
     Channels with no such admin are ignored, so adding the bot to a channel is no way around approval."""
     hit = _sponsor_cache.get(chat_id)
     if hit and time.time() - hit[0] < 300:
+        logger.debug("channel_sponsor(%s): cache hit -> %s", chat_id, hit[1])
         return hit[1]
     sponsor = None
     try:
@@ -439,4 +499,5 @@ async def channel_sponsor(client, chat_id):
     except Exception as e:
         logger.warning(f"Could not list admins of channel {chat_id}: {e}")
     _sponsor_cache[chat_id] = (time.time(), sponsor)
+    logger.info("channel_sponsor(%s) -> %s", chat_id, sponsor)
     return sponsor

@@ -55,6 +55,8 @@ streamgram/
 utils/formatting.py      Size / duration formatting used by /stats
   utils/access.py          Access rules, bans, history, limits, invites, access groups, revoked links
   utils/link_expiry.py     Automatic link expiry (default + per-user lifetime)
+  utils/link_security.py   Per-link random secret tokens (replaces the weak file_unique_id hash for new links)
+  utils/force_subscribe.py Shared UPDATES_CHANNEL membership check, used by /start, /help, /about and the file handler
   utils/logging_config.py  Logging setup (info.log + error.log, rotation, levels)
 start_bot.py / run_tracemalloc.py   Alternative launchers (plain / with memory profiling)
 Procfile, app.json, process.json    Heroku / PM2 deploy descriptors
@@ -194,7 +196,7 @@ Deep link `/start inv_<token>` is handled inside the middleware so invitees with
 { "id": 123456789, "join_date": "2026-10-03", "ag_p": "<MY_PASS, only if logged in>" }
 ```
 
-Access collections (same database): `access_users` (status: pending/approved/rejected/revoked/banned, profile, granted_at/by/source, optional `quota`), `access_history`, `access_usage`, `access_chats`, `access_invites`, `access_settings`, `join_requests` (`{id, requested_on}`).
+Access collections (same database): `access_users` (status: pending/approved/rejected/revoked/banned, profile, granted_at/by/source, optional `quota`), `access_history`, `access_usage`, `access_chats`, `access_invites`, `access_settings`, `join_requests` (`{id, requested_on}`), `access_links` (expiry), `access_link_tokens` (`{msg_id, token, created_at}` — the random per-link secret, see §14b).
 
 **On disk:** `logs/log_<timestamp>.log` (one per run), `logs/request_logs.csv` (timestamp, IP, full URL of every web request), Pyrogram `*.session` files (git-ignored), `broadcast.txt` (temporary).
 
@@ -245,7 +247,7 @@ Ordered roughly by impact. None of these have been changed yet.
 11. **`/stats` has no owner restriction**, leaking server resource info to any allowed user. README lists the command as `status`.
 12. **`stream.py`**: `m.reply_text(e)` passes an exception object; `Content-Range` header is also sent on non-range 200 responses; `except (TimeoutError, AttributeError): pass` in `yield_file` silently truncates streams (see `unknown_errors.txt`: recurring `503 Timedout upload.GetFile`).
 13. **`bool(getenv('NO_PORT', False))` / `HAS_SSL`:** any non-empty string, including `"false"` or `"0"`, evaluates to `True`.
-14. **Housekeeping:** duplicate `WORKERS` assignment; duplicate `readable_time`/`get_readable_time` helpers; `utils_bot.py` lives outside the package; sonar/coverage config are placeholders; unused `file_size.py`.
+14. ~~**Housekeeping:** duplicate `WORKERS` assignment; duplicate `readable_time`/`get_readable_time` helpers; `utils_bot.py` lives outside the package; sonar/coverage config are placeholders; unused `file_size.py`.~~ Fixed 2026-10-05 (see `docs/02-progress-and-checklist.md` §5E). README/branding still points at the original author's channels and PayPal — kept as-is for now (§6 there). (Later rebranded in full — see the README and app.json history.)
 
 ## 14. Link expiry
 
@@ -257,6 +259,16 @@ Module: `streamgram/utils/link_expiry.py` (self-contained; the rest of the code 
 - **Channels:** posts in a channel use the lifetime of the channel admin that is charged for the usage.
 - **Resilience:** answers are cached for 60 s; if the database cannot be reached the last known answer is used (or the link is treated as unlimited) so downloads do not break.
 - Expired records are kept on purpose: deleting one would make the link live again.
+
+## 14b. Link security (stronger tokens, C2)
+
+Module: `streamgram/utils/link_security.py` (`LinkTokens`, instance `link_tokens`).
+
+- **The problem it replaces:** the original "hash" in a link's `?hash=` query param was just a prefix (6, later 12 characters) of Telegram's `file_unique_id` for that file — short, and derived from an id that isn't actually secret.
+- **New links:** when a link is created (`private_receive_handler`, `channel_receive_handler`), `link_tokens.issue(msg_id)` generates a random `secrets.token_urlsafe(9)` (12 URL-safe characters, ~72 bits of entropy) and stores it against the bin-channel message id in `access_link_tokens`. That token, not a hash of the file, goes into the URL.
+- **Validation** (`link_tokens.check(msg_id, unique_id, secure_hash)`, used by `stream_routes.media_streamer`, `render_template.render_page` and the `/start <id>_<hash>` deep link): if a token was issued for that message, the request's hash must match it exactly; otherwise it falls back to the old `file_properties.hash_ok()` prefix check, so links issued before this module existed keep working unchanged.
+- **Consequence:** once a message has an issued token, the *old* file_unique_id-derived hash for that same file no longer validates — only the issued token does.
+- **Resilience:** like `link_expiry`, lookups are cached (60 s) and a database hiccup keeps the last known answer rather than breaking a download.
 
 ## 15. Logging
 

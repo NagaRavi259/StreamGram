@@ -32,12 +32,17 @@ async def initialize_clients():
                 no_updates=True,
             ).start()
             work_loads[client_id] = 0
+            logger.debug(f"Client {client_id} started successfully")
             return client_id, client
         except Exception:
             logger.error(f"Failed starting Client - {client_id} Error:", exc_info=True)
-    
+
     clients = await asyncio.gather(*[start_client(i, token) for i, token in all_tokens.items()])
-    multi_clients.update(dict(clients))
+    started = [c for c in clients if c is not None]
+    failed = len(clients) - len(started)
+    if failed:
+        logger.warning(f"{failed} of {len(clients)} MULTI_TOKEN_* client(s) failed to start and were skipped")
+    multi_clients.update(dict(started))
     if len(multi_clients) != 1:
         Var.MULTI_CLIENT = True
         logger.info("Multi-Client Mode Enabled")

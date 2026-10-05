@@ -25,15 +25,20 @@ async def sts(c: Client, m: Message):
     user_id=m.from_user.id
     if user_id in Var.OWNER_ID:
         total_users = await db.total_users_count()
+        logger.info("/users requested by owner %s -> %s users", user_id, total_users)
         await m.reply_text(text=f"Total Users in DB: {total_users}", quote=True)
+    else:
+        logger.debug("/users ignored: %s is not an owner", user_id)
 
 
 @StreamBot.on_message(filters.command("broadcast") & filters.private & filters.user(list(Var.OWNER_ID)))
 async def broadcast_(c, m):
     user_id=m.from_user.id
     if not m.reply_to_message:
+        logger.debug("/broadcast by %s rejected: no replied-to message", user_id)
         await m.reply_text("Reply to the message you want to broadcast with /broadcast.", quote=True)
         return
+    logger.info("/broadcast started by owner %s", user_id)
     out = await m.reply_text(
             text=f"Broadcast initiated! You will be notified with log file when all the users are notified."
     )
@@ -60,6 +65,7 @@ async def broadcast_(c, m):
             rec = await access_db.get_user(int(user['id']))
             if rec and rec.get('status') == 'banned':
                 skipped += 1  # banned people are not sent broadcasts
+                logger.debug("broadcast: skipping banned user %s", user['id'])
                 continue
             sts, msg = await send_msg(
                 user_id=int(user['id']),
@@ -87,6 +93,10 @@ async def broadcast_(c, m):
     if broadcast_ids.get(broadcast_id):
         broadcast_ids.pop(broadcast_id)
     completed_in = datetime.timedelta(seconds=int(time.time() - start_time))
+    logger.info(
+        "/broadcast by %s finished in %s: %s done, %s success, %s failed, %s skipped",
+        user_id, completed_in, done, success, failed, skipped,
+    )
     await asyncio.sleep(3)
     await out.delete()
     if failed == 0:

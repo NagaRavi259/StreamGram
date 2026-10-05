@@ -1,7 +1,13 @@
 # (c) adarsh-goel
 # Bot Uptime
+import logging
+
+logger = logging.getLogger("streamgram.utils.time_format")
+
 
 def get_readable_time(seconds: int) -> str:
+    if seconds < 0:
+        logger.warning("get_readable_time called with a negative value: %s", seconds)
     count = 0
     readable_time = ""
     time_list = []
@@ -22,4 +28,5 @@ def get_readable_time(seconds: int) -> str:
         readable_time += time_list.pop() + ", "
     time_list.reverse()
     readable_time += ": ".join(time_list)
-    return readable_time 
+    logger.debug("get_readable_time -> %r", readable_time)
+    return readable_time

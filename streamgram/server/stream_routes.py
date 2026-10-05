@@ -20,7 +20,7 @@ from streamgram.utils.render_template import render_page
 from streamgram.vars import Var
 from streamgram.utils.access import access_db
 from streamgram.utils.link_expiry import link_expiry
-from streamgram.utils.file_properties import hash_ok
+from streamgram.utils.link_security import link_tokens
 from datetime import datetime
 
 router = APIRouter()
@@ -28,6 +28,7 @@ router = APIRouter()
 # Root route for server status
 @router.get("/", response_class=JSONResponse)
 async def root_route_handler():
+    logger.debug("Status endpoint requested")
     return JSONResponse(
         content={
             "server_status": "running",
@@ -58,7 +59,9 @@ def parse_path(request: Request, path: str):
     if match:
         return int(match.group(2)), match.group(1)
     if id_match:
+        logger.debug("parse_path(%r): id with no hash", path)
         return int(id_match.group(1)), None
+    logger.debug("parse_path(%r): does not match any known pattern", path)
     raise HTTPException(status_code=400, detail="Invalid path format")
 
 
@@ -69,6 +72,7 @@ def parse_range(header, file_size):
         return None
     m = RANGE_RE.fullmatch(header)
     if not m or (m.group(1) == "" and m.group(2) == ""):
+        logger.debug("parse_range(%r): malformed, ignoring", header)
         return None  # malformed: ignore the header, as RFC 9110 allows
     first, last = m.group(1), m.group(2)
     unsatisfiable = HTTPException(
@@ -77,12 +81,17 @@ def parse_range(header, file_size):
     if first == "":  # suffix range: last N bytes
         n = int(last)
         if n == 0 or file_size == 0:
+            logger.debug("parse_range(%r): unsatisfiable suffix range (file_size=%s)", header, file_size)
             raise unsatisfiable
-        return max(file_size - n, 0), file_size - 1
+        result = max(file_size - n, 0), file_size - 1
+        logger.debug("parse_range(%r) -> %s", header, result)
+        return result
     start = int(first)
     end = min(int(last), file_size - 1) if last else file_size - 1
     if start >= file_size or start > end:
+        logger.debug("parse_range(%r): unsatisfiable (file_size=%s)", header, file_size)
         raise unsatisfiable
+    logger.debug("parse_range(%r) -> (%s, %s)", header, start, end)
     return start, end
 
 
@@ -150,7 +159,7 @@ async def media_streamer(request: Request, id: int, secure_hash: str):
         raise FIleNotFound
     file_id = await tg_connect.get_file_properties(id)
 
-    if not hash_ok(file_id.unique_id, secure_hash):
+    if not await link_tokens.check(id, file_id.unique_id, secure_hash):
         logger.debug(f"Invalid hash for message with ID {id}")
         raise InvalidHash
     if await link_expiry.is_expired(id):
@@ -160,6 +169,7 @@ async def media_streamer(request: Request, id: int, secure_hash: str):
     byte_range = parse_range(range_header, file_size)
 
     if file_size == 0:
+        logger.debug("media_streamer(%s): zero-byte file", id)
         return Response(status_code=200, headers={"Content-Length": "0", "Accept-Ranges": "bytes"})
 
     from_bytes, until_bytes = byte_range or (0, file_size - 1)
@@ -209,5 +219,7 @@ async def media_streamer(request: Request, id: int, secure_hash: str):
     return StreamingResponse(body, status_code=206 if byte_range else 200, headers=headers, media_type="application/octet-stream")
 
 def sanitize_header_value(value):
-    value = value.encode("ascii", errors="ignore").decode("ascii")
-    return re.sub(r'[\x00-\x1f\x7f"\\]', "", value)
+    cleaned = re.sub(r'[\x00-\x1f\x7f"\\]', "", value.encode("ascii", errors="ignore").decode("ascii"))
+    if cleaned != value:
+        logger.debug("sanitize_header_value: %r -> %r", value, cleaned)
+    return cleaned

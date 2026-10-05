@@ -53,6 +53,7 @@ def who(rec_or_id, uid=None):
 
 async def edit(cq: CallbackQuery, text, rows):
     if cq.message is None:  # the menu message is too old for Telegram to let us edit it
+        logger.debug("edit(): menu message too old for owner %s", getattr(getattr(cq, "from_user", None), "id", "?"))
         await cq.answer("This menu is too old, send /admin again.", show_alert=True)
         return
     try:
@@ -60,7 +61,7 @@ async def edit(cq: CallbackQuery, text, rows):
             text, reply_markup=InlineKeyboardMarkup(rows), parse_mode=HTML, disable_web_page_preview=True
         )
     except MessageNotModified:
-        pass
+        logger.debug("edit(): message unchanged, Telegram rejected the edit as a no-op")
 
 
 def pager(prefix, page, total):
@@ -69,6 +70,7 @@ def pager(prefix, page, total):
         row.append(B("◀ Prev", callback_data=f"{prefix}:{page - 1}"))
     if (page + 1) * PER_PAGE < total:
         row.append(B("Next ▶", callback_data=f"{prefix}:{page + 1}"))
+    logger.debug("pager(%s, page=%s, total=%s) -> %s button(s)", prefix, page, total, len(row))
     return [row] if row else []
 
 
@@ -125,6 +127,7 @@ async def _is_access_group(_, __, update):
 async def on_join_request(b: Client, r):
     """Anyone asking to join an access group gets access by default.
     The bot must be an admin of the group with the 'invite users' right to receive these."""
+    logger.info("on_join_request: %s asked to join access chat %s", r.from_user.id, r.chat.id)
     await access_db.add_join_request(r.from_user.id)
     await access_db.log(r.from_user.id, "join_request", 0, str(r.chat.id))
 
@@ -138,8 +141,10 @@ async def track_bot_chats(b: Client, u):
     if u.new_chat_member is None or u.new_chat_member.status in (
         enums.ChatMemberStatus.LEFT, enums.ChatMemberStatus.BANNED
     ):
+        logger.info("track_bot_chats: the bot left/was removed from %s", u.chat.id)
         await access_db.forget_chat(u.chat.id)
     else:
+        logger.debug("track_bot_chats: the bot's membership in %s changed to %s", u.chat.id, u.new_chat_member.status)
         await access_db.note_chat(u.chat)
 
 
@@ -150,6 +155,7 @@ _seen_chats = set()
 async def see_group(b: Client, m: Message):
     """Cheap fallback: learn about groups the bot was already in before this feature existed."""
     if m.chat.id not in _seen_chats:
+        logger.debug("see_group: first sighting of chat %s", m.chat.id)
         _seen_chats.add(m.chat.id)
         await access_db.note_chat(m.chat)
 
@@ -158,6 +164,7 @@ async def see_group(b: Client, m: Message):
 @StreamBot.on_callback_query(filters.regex(r"^req:access$"))
 async def request_access(c: Client, cq: CallbackQuery):
     user = cq.from_user
+    logger.debug("request_access: %s", user.id)
     if is_exempt(user.id):
         return await cq.answer("You already have access.", show_alert=True)
     rec = await access_db.get_user(user.id)
@@ -171,8 +178,10 @@ async def request_access(c: Client, cq: CallbackQuery):
     if status in ("rejected", "revoked"):
         wait = (rec.get("updated_at") or 0) + REQUEST_COOLDOWN - time.time()
         if wait > 0:
+            logger.debug("request_access: %s still in cooldown for %ss", user.id, wait)
             return await cq.answer(f"Please wait about {fmt_duration(wait)} before asking again.", show_alert=True)
     await access_db.set_status(user.id, "pending", 0, profile_of(user), note="requested via button")
+    logger.info("request_access: %s requested access, notifying owners", user.id)
     await cq.answer("Request sent ✅")
     try:
         await cq.message.edit_text("⏳ **Request sent.** You will be notified when the admin decides.")
@@ -199,23 +208,27 @@ def decision_markup(uid):
 async def accept_invite(c: Client, cq: CallbackQuery):
     token = cq.data.split(":", 2)[2]
     ok = await redeem(c, cq.from_user, token)
+    logger.info("accept_invite: %s -> %s", cq.from_user.id, "accepted" if ok else "invalid/expired")
     await cq.answer("Access granted ✅" if ok else "This invite is invalid or expired.", show_alert=not ok)
     if ok:
         try:
             await cq.message.edit_text("✅ **Invite accepted.** Send me any file to get a link.")
         except Exception:
-            pass
+            logger.debug("accept_invite: could not edit the invite message", exc_info=True)
 
 
 async def redeem(c: Client, user, token) -> bool:
     """Used by the 'Accept' button and by the /start inv_<token> deep link (see start_help)."""
     rec = await access_db.get_user(user.id)
     if rec and rec.get("status") == "banned":
+        logger.info("redeem: %s is banned, refusing the invite", user.id)
         return False
     inv = await access_db.redeem_invite(token, user.id)
     if not inv:
+        logger.info("redeem: invite rejected for %s", user.id)
         return False
     await access_db.set_status(user.id, "approved", inv["by"], profile_of(user), source="invite", note="invite accepted")
+    logger.info("redeem: %s approved via invite from owner %s", user.id, inv["by"])
     await notify_owners(c, f"📨 {who({'id': user.id, 'first_name': user.first_name})} accepted an invite.")
     return True
 
@@ -235,6 +248,7 @@ OUTCOME = {"apr": "✅ Approved", "rej": "❌ Rejected", "ban": "🚫 Banned", "
 async def apply_action(c: Client, owner_id, action, uid):
     status, to_user = ACTIONS[action]
     source = "manual" if action == "apr" else None
+    logger.info("apply_action: owner %s set %s -> %s", owner_id, uid, status)
     await access_db.set_status(uid, status, owner_id, source=source, note=f"by owner {owner_id}")
     if action == "ban":
         await access_db.remove_join_request(uid)
@@ -255,6 +269,8 @@ async def on_action(c: Client, cq: CallbackQuery):
     already = rec.get("status") == ACTIONS[action][0]
     if not already:
         await apply_action(c, cq.from_user.id, action, uid)
+    else:
+        logger.debug("on_action: %s already has status %s, no-op", uid, rec.get("status"))
     note = OUTCOME[action] + (" (already)" if already else "")
     if action in ("rev", "rej") and await group_access(c, uid):
         # revoking cannot remove access that comes from an access group; only a ban can
@@ -275,6 +291,7 @@ async def on_action(c: Client, cq: CallbackQuery):
 
 @StreamBot.on_callback_query(filters.regex(r"^adm:noop$") & owner_only)
 async def cb_noop(c: Client, cq: CallbackQuery):
+    logger.debug("cb_noop: inert button tapped by %s", cq.from_user.id)
     await cq.answer()
 
 
@@ -303,6 +320,7 @@ async def home_view():
 
 @StreamBot.on_message(filters.command("admin") & filters.private & owner_only)
 async def admin_cmd(c: Client, m: Message):
+    logger.info("/admin opened by %s", m.from_user.id)
     inputs.pop(m.from_user.id, None)
     text, rows = await home_view()
     await m.reply_text(text, reply_markup=InlineKeyboardMarkup(rows), parse_mode=HTML)
@@ -310,6 +328,7 @@ async def admin_cmd(c: Client, m: Message):
 
 @StreamBot.on_callback_query(filters.regex(r"^adm:home$") & owner_only)
 async def cb_home(c, cq):
+    logger.debug("cb_home: %s", cq.from_user.id)
     inputs.pop(cq.from_user.id, None)
     text, rows = await home_view()
     await edit(cq, text, rows)
@@ -317,6 +336,7 @@ async def cb_home(c, cq):
 
 @StreamBot.on_callback_query(filters.regex(r"^adm:close$") & owner_only)
 async def cb_close(c, cq):
+    logger.debug("cb_close: %s", cq.from_user.id)
     inputs.pop(cq.from_user.id, None)
     if cq.message is not None:
         await cq.message.delete()
@@ -342,6 +362,7 @@ async def users_view(statuses, page, title, prefix, sort_field):
 @StreamBot.on_callback_query(filters.regex(r"^adm:users:\d+$") & owner_only)
 async def cb_users(c, cq):
     page = int(cq.data.split(":")[2])
+    logger.debug("cb_users: page %s", page)
     await edit(cq, *await users_view(
         ACCESS_STATUSES, page, "👥 Users with access (<b>{total}</b>), most recently active first", "adm:users", "last_used"))
 
@@ -349,6 +370,7 @@ async def cb_users(c, cq):
 @StreamBot.on_callback_query(filters.regex(r"^adm:pend:\d+$") & owner_only)
 async def cb_pending(c, cq):
     page = int(cq.data.split(":")[2])
+    logger.debug("cb_pending: page %s", page)
     await edit(cq, *await users_view(
         ("pending",), page, "⏳ Pending requests (<b>{total}</b>), newest first", "adm:pend", "requested_at"))
 
@@ -356,6 +378,7 @@ async def cb_pending(c, cq):
 async def show_user(c, cq, uid):
     rec = await access_db.get_user(uid)
     if not rec:
+        logger.debug("show_user(%s): not found", uid)
         return await edit(cq, "User not found.", [HOME_BTN])
     status = rec.get("status", "-")
     period, limit = await access_db.effective_quota(uid)
@@ -417,6 +440,7 @@ def history_text(items, total, title):
 @StreamBot.on_callback_query(filters.regex(r"^adm:hist:\d+$") & owner_only)
 async def cb_history(c, cq):
     page = int(cq.data.split(":")[2])
+    logger.debug("cb_history: page %s", page)
     items, total = await access_db.get_history(page * PER_PAGE, PER_PAGE)
     await edit(cq, history_text(items, total, "📜 History, newest first"), [*pager("adm:hist", page, total), HOME_BTN])
 
@@ -425,6 +449,7 @@ async def cb_history(c, cq):
 async def cb_user_history(c, cq):
     _, _, uid, page = cq.data.split(":")
     uid, page = int(uid), int(page)
+    logger.debug("cb_user_history: uid=%s page=%s", uid, page)
     items, total = await access_db.get_history(page * PER_PAGE, PER_PAGE, uid)
     rows = pager(f"adm:uh:{uid}", page, total)
     rows.append([B("◀ User", callback_data=f"adm:u:{uid}"), *HOME_BTN])
@@ -435,6 +460,7 @@ async def cb_user_history(c, cq):
 @StreamBot.on_callback_query(filters.regex(r"^adm:q:\d+$") & owner_only)
 async def cb_quota(c, cq):
     uid = int(cq.data.split(":")[2])
+    logger.debug("cb_quota: uid=%s", uid)
     target = "everyone (default)" if uid == 0 else f"user <code>{uid}</code>"
     period, limit = await (access_db.get_default_quota() if uid == 0 else access_db.effective_quota(uid))
     text = (
@@ -457,6 +483,7 @@ async def cb_quota(c, cq):
 async def cb_quota_period(c, cq):
     _, _, uid, period = cq.data.split(":")
     uid = int(uid)
+    logger.debug("cb_quota_period: uid=%s period=%s", uid, period)
     if period in ("unlimited", "default"):
         if uid == 0:
             await access_db.set_default_quota("unlimited", None)
@@ -481,6 +508,7 @@ async def cb_quota_period(c, cq):
 async def cb_expiry(c, cq):
     inputs.pop(cq.from_user.id, None)
     uid = int(cq.data.split(":")[2])
+    logger.debug("cb_expiry: uid=%s", uid)
     if uid == 0:
         ttl, target = await link_expiry.get_default(), "everyone (default)"
         source = ""
@@ -504,6 +532,7 @@ async def cb_expiry(c, cq):
 
 async def apply_expiry(uid, value, owner_id):
     """value: seconds, None (unlimited) or the string 'default' (drop the personal setting)."""
+    logger.info("apply_expiry: owner %s set expiry for %s to %r", owner_id, uid, value)
     if value == "default":
         await link_expiry.clear_personal(uid)
         note = "default"
@@ -534,6 +563,7 @@ async def cb_expiry_set(c, cq):
 # ---- invites
 @StreamBot.on_callback_query(filters.regex(r"^adm:inv$") & owner_only)
 async def cb_invite(c, cq):
+    logger.debug("cb_invite: %s", cq.from_user.id)
     inputs.pop(cq.from_user.id, None)
     await edit(
         cq,
@@ -560,12 +590,14 @@ def share_markup(link, extra=None):
 async def cb_invite_link(c, cq):
     token = await access_db.create_invite(cq.from_user.id)
     await access_db.log(0, "invite_link_created", cq.from_user.id, token)
+    logger.info("cb_invite_link: owner %s created a single-use invite link", cq.from_user.id)
     link = invite_link(token)
     await edit(cq, f"🔗 Single-use invite link (valid 7 days):\n\n<code>{link}</code>", share_markup(link))
 
 
 @StreamBot.on_callback_query(filters.regex(r"^adm:invu$") & owner_only)
 async def cb_invite_user(c, cq):
+    logger.debug("cb_invite_user: owner %s will type a username/id next", cq.from_user.id)
     inputs[cq.from_user.id] = {"kind": "invite_user"}
     await edit(cq, "Send the person's <b>@username</b> or numeric <b>user ID</b>.\n/cancel to abort.",
                [[B("✖ Cancel", callback_data="adm:inv")]])
@@ -574,6 +606,7 @@ async def cb_invite_user(c, cq):
 # ---- groups
 @StreamBot.on_callback_query(filters.regex(r"^adm:grp$") & owner_only)
 async def cb_groups(c, cq):
+    logger.debug("cb_groups: %s", cq.from_user.id)
     inputs.pop(cq.from_user.id, None)
     rows, lines = [], ["🏘 <b>Access groups</b>\nMembers of these chats (and people who asked to join) get access. "
                        "The bot only reads membership; it never posts there.\n"]
@@ -608,8 +641,10 @@ async def cb_group_pick(c, cq):
 
 @StreamBot.on_callback_query(filters.regex(r"^adm:gp:-?\d+$") & owner_only)
 async def cb_group_enable(c, cq):
-    await access_db.set_chat_enabled(int(cq.data.split(":")[2]), True)
-    await access_db.log(0, "group_added", cq.from_user.id, cq.data.split(":")[2])
+    chat_id = cq.data.split(":")[2]
+    logger.info("cb_group_enable: owner %s enabled access chat %s", cq.from_user.id, chat_id)
+    await access_db.set_chat_enabled(int(chat_id), True)
+    await access_db.log(0, "group_added", cq.from_user.id, chat_id)
     await cq.answer("Group added ✅")
     asyncio.get_event_loop().create_task(backfill_join_requests())
     await cb_groups(c, cq)
@@ -617,14 +652,17 @@ async def cb_group_enable(c, cq):
 
 @StreamBot.on_callback_query(filters.regex(r"^adm:grm:-?\d+$") & owner_only)
 async def cb_group_remove(c, cq):
-    await access_db.set_chat_enabled(int(cq.data.split(":")[2]), False)
-    await access_db.log(0, "group_removed", cq.from_user.id, cq.data.split(":")[2])
+    chat_id = cq.data.split(":")[2]
+    logger.info("cb_group_remove: owner %s removed access chat %s", cq.from_user.id, chat_id)
+    await access_db.set_chat_enabled(int(chat_id), False)
+    await access_db.log(0, "group_removed", cq.from_user.id, chat_id)
     await cq.answer("Group removed")
     await cb_groups(c, cq)
 
 
 @StreamBot.on_callback_query(filters.regex(r"^adm:gm$") & owner_only)
 async def cb_group_manual(c, cq):
+    logger.debug("cb_group_manual: owner %s will type a chat id/username next", cq.from_user.id)
     inputs[cq.from_user.id] = {"kind": "group_id"}
     await edit(cq, "Send the group's numeric ID (like <code>-100123…</code>) or @username. The bot must already be in it.\n/cancel to abort.",
                [[B("✖ Cancel", callback_data="adm:grp")]])
@@ -636,8 +674,10 @@ async def revoke_cmd(c: Client, m: Message):
     """/revoke <message id>: stop serving a file. The id is the number in its link (…/<id>/?hash=…)."""
     cmd, args = m.command[0], m.command[1:]
     if len(args) != 1 or not args[0].isdigit():
+        logger.debug("revoke_cmd: bad usage from %s: %r", m.from_user.id, m.text)
         return await m.reply_text(f"Usage: /{cmd} <message id from the link>")
     msg_id = int(args[0])
+    logger.info("revoke_cmd: owner %s ran /%s %s", m.from_user.id, cmd, msg_id)
     await access_db.set_revoked(msg_id, revoked=(cmd == "revoke"))
     await access_db.log(0, "link_revoked" if cmd == "revoke" else "link_restored", m.from_user.id, str(msg_id))
     await m.reply_text(f"{'⛔ Links to' if cmd == 'revoke' else '♻️ Links to'} message <code>{msg_id}</code> "
@@ -652,11 +692,13 @@ async def owner_input(c: Client, m: Message):
         return
     text = m.text.strip()
     if text == "/cancel":
+        logger.debug("owner_input: %s cancelled (kind=%s)", m.from_user.id, state["kind"])
         inputs.pop(m.from_user.id)
         return await m.reply_text("Cancelled. /admin")
     if text.startswith("/"):
         return
     kind = state["kind"]
+    logger.debug("owner_input: %s submitted text for kind=%s", m.from_user.id, kind)
     try:
         if kind == "quota":
             if not text.isdigit() or int(text) < 1:
@@ -690,6 +732,7 @@ async def owner_input(c: Client, m: Message):
             inputs.pop(m.from_user.id)
             if target is None:
                 # The bot has never met this person, so it cannot DM them: make a link only that ID can use.
+                logger.info("owner_input: %s invited unknown id %s (link-only)", m.from_user.id, text)
                 token = await access_db.create_invite(m.from_user.id, int(text))
                 await access_db.log(int(text), "invited", m.from_user.id, "link only")
                 link = invite_link(token)
@@ -709,8 +752,10 @@ async def owner_input(c: Client, m: Message):
                     "📨 You have been invited to use this bot. Tap Accept to get access.",
                     reply_markup=InlineKeyboardMarkup([[B("✅ Accept", callback_data=f"inv:acc:{token}")]]),
                 )
+                logger.info("owner_input: %s invited %s (DM sent)", m.from_user.id, target.id)
                 note = f"✅ Invite sent to {who({'id': target.id, 'first_name': target.first_name})}."
             except Exception:
+                logger.info("owner_input: %s invited %s (DM failed, link-only)", m.from_user.id, target.id)
                 note = (f"⚠️ Couldn't DM {who({'id': target.id, 'first_name': target.first_name})} "
                         "(they haven't started the bot). Send them this link instead:")
             await m.reply_text(
@@ -722,9 +767,11 @@ async def owner_input(c: Client, m: Message):
             chat = await c.get_chat(int(text) if text.lstrip("-").isdigit() else text.lstrip("@"))
             await c.get_chat_member(chat.id, "me")  # raises if the bot isn't in it
             inputs.pop(m.from_user.id)
+            logger.info("owner_input: %s added access chat %s (%s)", m.from_user.id, chat.id, chat.title)
             await access_db.note_chat(chat, enabled=True)
             await access_db.log(0, "group_added", m.from_user.id, str(chat.id))
             asyncio.get_event_loop().create_task(backfill_join_requests())
             await m.reply_text(f"✅ Added <b>{html.escape(chat.title or str(chat.id))}</b> (<code>{chat.id}</code>).\n/admin", parse_mode=HTML)
     except Exception as e:
+        logger.warning("owner_input: %s (kind=%s) failed: %s", m.from_user.id, kind, e, exc_info=True)
         await m.reply_text(f"❌ Couldn't do that: <code>{html.escape(str(e))}</code>\nTry again or /cancel.", parse_mode=HTML)

@@ -3,6 +3,7 @@ in-memory stand-ins for MongoDB / Telegram objects."""
 import asyncio
 import types
 from pymongo.errors import DuplicateKeyError
+from pyrogram.errors import UserNotParticipant
 
 
 LOOP = asyncio.new_event_loop()
@@ -84,8 +85,11 @@ def install_fakes(db):
     db.users, db.usage, db.history = FakeCol("id"), FakeCol(), FakeCol()
     db.join_requests, db.settings, db.revoked = FakeCol(), FakeCol(), FakeCol()
     db.invites, db.chats, db.links = FakeCol(), FakeCol(), FakeCol()
+    db.link_tokens = FakeCol("msg_id")
     from streamgram.utils.link_expiry import link_expiry
+    from streamgram.utils.link_security import link_tokens
     link_expiry._cache.clear()
+    link_tokens._cache.clear()
     db._touched.clear(); db._locks.clear(); db._status_cache.clear(); db._revoked = {"ts": 0, "ids": set()}
 
 
@@ -96,10 +100,12 @@ class Recorder:
         self.__dict__.update(kw)
 
     async def reply_text(self, text, **k): self.sent.append((text, k)); return self
-    async def send_message(self, chat, text, **k): self.sent.append((text, k))
+    async def reply_photo(self, photo, **k): self.sent.append((k.get("caption"), {"photo": photo, **k})); return self
+    async def send_message(self, chat=None, text=None, chat_id=None, **k): self.sent.append((text, k))
     async def answer(self, text=None, show_alert=False, **k): self.answers.append((text, show_alert))
     async def edit_text(self, text, **k): self.edits.append((text, k))
     async def delete(self): pass
+    async def get_chat_member(self, chat, who): raise UserNotParticipant("not a member (default test stand-in)")
 
 
 def user(uid, name="N"): return types.SimpleNamespace(id=uid, first_name=name, username=None, is_bot=False)

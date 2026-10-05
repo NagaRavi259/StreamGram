@@ -22,6 +22,7 @@ except Exception:
 
 # Initialize FastAPI app
 app = FastAPI(docs_url=None, redoc_url=None)
+logger.debug("FastAPI app created (docs disabled)")
 
 # Middleware for request logging
 @app.middleware("http")
@@ -40,13 +41,16 @@ async def request_logging_middleware(request: Request, call_next):
 
     # Call the next middleware/handler
     response = await call_next(request)
+    logger.debug("%s %s -> %s", request.method, endpoint, response.status_code)
     return response
 
 # Define the route to serve the favicon.ico
 @app.get("/favicon.ico", include_in_schema=False)
 async def favicon():
     # Adjust the file path to where your favicon.ico is located
+    logger.debug("Serving favicon.ico")
     return FileResponse("streamgram/favicon.ico")
 
 # Include routes from stream_routes
 app.include_router(router)
+logger.info("Streaming routes mounted")

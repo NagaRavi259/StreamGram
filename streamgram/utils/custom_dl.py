@@ -15,12 +15,15 @@ from pyrogram.file_id import FileId, FileType, ThumbnailSource
 
 async def chunk_size(length):
     length = max(length, 1)
-    return 2 ** max(min(math.ceil(math.log2(length / 1024)), 10), 2) * 1024
+    size = 2 ** max(min(math.ceil(math.log2(length / 1024)), 10), 2) * 1024
+    logger.debug("chunk_size(%s) -> %s", length, size)
+    return size
 
 
 async def offset_fix(offset, chunksize):
-    offset -= offset % chunksize
-    return offset
+    fixed = offset - offset % chunksize
+    logger.debug("offset_fix(%s, %s) -> %s", offset, chunksize, fixed)
+    return fixed
 
 
 class ByteStreamer:
@@ -42,6 +45,7 @@ class ByteStreamer:
         self.clean_timer = 30 * 60
         self.client: Client = client
         self.cached_file_ids: Dict[int, FileId] = {}
+        logger.debug("ByteStreamer created for client %r", client)
         asyncio.create_task(self.clean_cache())
 
     async def get_file_properties(self, id: int) -> FileId:
@@ -169,6 +173,7 @@ class ByteStreamer:
                 file_reference=file_id.file_reference,
                 thumb_size=file_id.thumbnail_size,
             )
+        logger.debug("get_location: file_type=%s -> %s", file_type, type(location).__name__)
         return location
 
     async def yield_file(

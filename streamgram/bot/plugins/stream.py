@@ -11,11 +11,13 @@ from streamgram.utils.human_readable import humanbytes
 from streamgram.vars import Var
 from streamgram.utils.access import access_db, channel_sponsor, fmt_duration
 from streamgram.utils.link_expiry import link_expiry
+from streamgram.utils.link_security import link_tokens
 from urllib.parse import quote_plus
 from pyrogram import filters, Client
-from pyrogram.errors import FloodWait, UserNotParticipant
+from pyrogram.errors import FloodWait
 from pyrogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton
-from streamgram.utils.file_properties import get_name, get_hash, get_media_file_size
+from streamgram.utils.file_properties import get_name, get_media_file_size
+from streamgram.utils.force_subscribe import enforce_updates_channel
 import logging
 logger = logging.getLogger("streamgram.bot.plugins.stream")
 
@@ -38,7 +40,9 @@ async def is_logged_in(user_id) -> bool:
     bot on its own, independent of the admin-approval / access-group system."""
     if not MY_PASS:
         return False
-    return await pass_db.get_user_pass(user_id) == pass_token(MY_PASS)
+    logged_in = await pass_db.get_user_pass(user_id) == pass_token(MY_PASS)
+    logger.debug("is_logged_in(%s) -> %s", user_id, logged_in)
+    return logged_in
 
 
 login_waiting = {}  # chat_id -> time until which the next text message is treated as the password
@@ -47,9 +51,11 @@ login_waiting = {}  # chat_id -> time until which the next text message is treat
 @StreamBot.on_message(filters.private & (filters.regex("login🔑") | filters.command("login")), group=4)
 async def login_handler(c: Client, m: Message):
     if not MY_PASS:
+        logger.debug("login_handler(%s): password login is disabled", m.chat.id)
         await m.reply_text("Password login is not enabled.")
         return
     login_waiting[m.chat.id] = time.time() + 90
+    logger.debug("login_handler(%s): waiting for the password", m.chat.id)
     await m.reply_text("Now send me the password.\n\n(You can use /cancel to cancel; I wait 90 seconds.)")
 
 
@@ -61,62 +67,41 @@ async def login_password_handler(c: Client, m: Message):
         return
     text = m.text.strip()
     if text.startswith("/") and text != "/cancel":
+        logger.debug("login_password_handler(%s): abandoned by another command", m.chat.id)
         return  # another command: abandon the login and let it run
     if text == "/cancel":
+        logger.debug("login_password_handler(%s): cancelled", m.chat.id)
         await m.reply_text("Process Cancelled Successfully")
     elif time.time() > expiry:
+        logger.debug("login_password_handler(%s): timed out", m.chat.id)
         await m.reply_text("I can't wait more for the password, try /login again")
     elif text == MY_PASS:
+        logger.info("login_password_handler(%s): correct password, logged in", m.chat.id)
         await pass_db.add_user_pass(m.chat.id, pass_token(text))
         await m.reply_text("yeah! you entered the password correctly")
     else:
+        logger.info("login_password_handler(%s): wrong password", m.chat.id)
         await m.reply_text("Wrong password, try again")
     try:
         await m.delete()  # don't leave the password in the chat
     except Exception:
-        pass
+        logger.debug("login_password_handler(%s): could not delete the password message", m.chat.id, exc_info=True)
 
 
 @StreamBot.on_message((filters.private) & (filters.document | filters.video | filters.audio | filters.photo) , group=4)
 async def private_receive_handler(c: Client, m: Message):
     # Access (admin-approved OR password-logged-in) was already decided by
     # start_help.check_user before this handler runs; no separate gate here.
+    logger.debug("private_receive_handler(): file from %s", m.from_user.id)
     if not await db.is_user_exist(m.from_user.id):
+        logger.info("private_receive_handler(): new user %s", m.from_user.id)
         await db.add_user(m.from_user.id)
         await c.send_message(
             Var.BIN_CHANNEL,
             f"Nᴇᴡ Usᴇʀ Jᴏɪɴᴇᴅ : \n\n Nᴀᴍᴇ : [{m.from_user.first_name}](tg://user?id={m.from_user.id}) Sᴛᴀʀᴛᴇᴅ Yᴏᴜʀ Bᴏᴛ !!"
         )
-    if Var.UPDATES_CHANNEL:
-        try:
-            user = await c.get_chat_member(Var.UPDATES_CHANNEL, m.chat.id)
-            if user.status == "kicked":
-                await c.send_message(
-                    chat_id=m.chat.id,
-                    text="𝚈𝙾𝚄 𝙰𝚁𝙴 𝙱𝙰𝙽𝙽𝙴𝙳../**",
-                    disable_web_page_preview=True
-                )
-                return
-        except UserNotParticipant:
-            await c.send_message(
-                chat_id=m.chat.id,
-                text="""<i>ᴊᴏɪɴ ᴍʏ ᴜᴘᴅᴀᴛᴇs ᴄʜᴀɴɴᴇʟ ᴛᴏ ᴜsᴇ ᴍᴇ..**</i>""",
-                reply_markup=InlineKeyboardMarkup(
-                    [
-                        [
-                            InlineKeyboardButton("ᴊᴏɪɴ ɴᴏᴡ", url=f"https://t.me/{Var.UPDATES_CHANNEL}")
-                        ]
-                    ]
-                )
-            )
-            return
-        except Exception as e:
-            await m.reply_text(e)
-            await c.send_message(
-                chat_id=m.chat.id,
-                text='\n🎉 Welcome to the Ultimate Test Bot! 🎉**\n\n🔹 **Enjoy All Features for FREE!**\n🔹 **No Ads, No Subscription!**\n\n**📁 How to Use:**\n\n1. **Forward a File** to this bot.\n2. **Receive a Link** to **Stream** or **Download** your file instantly!\n\n**💡 Key Features:**\n\n- **Completely Ad-Free Experience** 🚫\n- **No Subscription Required** 🎟️\n- **Fast & Easy File Sharing** 📤',
-                disable_web_page_preview=True)
-            return
+    if not await enforce_updates_channel(c, m.chat.id):
+        return
     # Check the limit and count this link in one step (a burst of files cannot all slip through).
     try:
         allowed, limit_msg, reservation = await access_db.reserve(m.from_user.id)
@@ -125,18 +110,18 @@ async def private_receive_handler(c: Client, m: Message):
         await m.reply_text("⚠️ Something went wrong on my side. Please try again in a moment.", quote=True)
         return
     if not allowed:
+        logger.info("private_receive_handler(): %s blocked by their limit", m.from_user.id)
         await m.reply_text(limit_msg, quote=True)
         return
     try:
         log_msg = await m.forward(chat_id=Var.BIN_CHANNEL)
         expires_at = await link_expiry.register(log_msg.id, m.from_user.id)
-        # stream_link = f"{Var.URL}watch/{str(log_msg.id)}/{quote_plus(get_name(log_msg))}?hash={get_hash(log_msg)}"
+        token = await link_tokens.issue(log_msg.id)
+        logger.info("private_receive_handler(): link created for %s -> bin message %s", m.from_user.id, log_msg.id)
 
-        # online_link = f"{Var.URL}{str(log_msg.id)}/{quote_plus(get_name(log_msg))}?hash={get_hash(log_msg)}"
+        stream_link = f"{Var.URL}watch/{str(log_msg.id)}/?hash={token}"
 
-        stream_link = f"{Var.URL}watch/{str(log_msg.id)}/?hash={get_hash(log_msg)}"
-
-        online_link = f"{Var.URL}{str(log_msg.id)}/?hash={get_hash(log_msg)}"
+        online_link = f"{Var.URL}{str(log_msg.id)}/?hash={token}"
 
         photo_xr="https://telegra.ph/file/3cd15a67ad7234c2945e7.jpg"
 
@@ -175,6 +160,7 @@ async def private_receive_handler(c: Client, m: Message):
         await c.send_message(chat_id=Var.BIN_CHANNEL, text=f"Gᴏᴛ FʟᴏᴏᴅWᴀɪᴛ ᴏғ {str(e.value)}s from [{m.from_user.first_name}](tg://user?id={m.from_user.id})\n\n**𝚄𝚜𝚎𝚛 𝙸𝙳 :** `{str(m.from_user.id)}`", disable_web_page_preview=True)
         await m.reply_text("Telegram asked me to slow down. Please send the file again.", quote=True)
     except Exception:
+        logger.exception("private_receive_handler(): failed to deliver a link to %s", m.from_user.id)
         await access_db.refund(reservation)
         raise
 
@@ -182,9 +168,12 @@ async def private_receive_handler(c: Client, m: Message):
 @StreamBot.on_message(filters.channel & ~filters.group & (filters.document | filters.video | filters.photo) & ~filters.forwarded, group=-1)
 async def channel_receive_handler(bot, broadcast):
     # Access groups/channels are only used to check membership: never reply to, forward or edit anything there.
+    logger.debug("channel_receive_handler(): post in channel %s", broadcast.chat.id)
     if broadcast.chat.id in await access_db.group_ids():
+        logger.debug("channel_receive_handler(): %s is an access chat, skipping", broadcast.chat.id)
         return
     if int(broadcast.chat.id) in Var.BANNED_CHANNELS:
+        logger.warning("channel_receive_handler(): %s is banned, leaving", broadcast.chat.id)
         await bot.leave_chat(broadcast.chat.id)
         return
     # Only channels with an admin who has access to the bot are served (and that admin's limit applies).
@@ -203,8 +192,11 @@ async def channel_receive_handler(bot, broadcast):
     try:
         log_msg = await broadcast.forward(chat_id=Var.BIN_CHANNEL)
         await link_expiry.register(log_msg.id, sponsor)
-        stream_link = f"{Var.URL}watch/{str(log_msg.id)}/{quote_plus(get_name(log_msg))}?hash={get_hash(log_msg)}"
-        online_link = f"{Var.URL}{str(log_msg.id)}/{quote_plus(get_name(log_msg))}?hash={get_hash(log_msg)}"
+        token = await link_tokens.issue(log_msg.id)
+        logger.info("channel_receive_handler(): link created for channel %s (sponsor %s) -> bin message %s",
+                    broadcast.chat.id, sponsor, log_msg.id)
+        stream_link = f"{Var.URL}watch/{str(log_msg.id)}/{quote_plus(get_name(log_msg))}?hash={token}"
+        online_link = f"{Var.URL}{str(log_msg.id)}/{quote_plus(get_name(log_msg))}?hash={token}"
         await log_msg.reply_text(
             text=f"**Cʜᴀɴɴᴇʟ Nᴀᴍᴇ:** `{broadcast.chat.title}`\n**Cʜᴀɴɴᴇʟ ID:** `{broadcast.chat.id}`\n**Rᴇǫᴜᴇsᴛ ᴜʀʟ:** {stream_link}",
             quote=True
@@ -229,4 +221,4 @@ async def channel_receive_handler(bot, broadcast):
     except Exception as e:
         await access_db.refund(reservation)
         await bot.send_message(chat_id=Var.BIN_CHANNEL, text=f"**#ᴇʀʀᴏʀ_ᴛʀᴀᴄᴇʙᴀᴄᴋ:** `{e}`", disable_web_page_preview=True)
-        logger.error(f"Cannot edit the channel message, give the bot edit permission in the updates and bin channels: {e}")
+        logger.exception("Cannot edit the channel message, give the bot edit permission in the updates and bin channels")

@@ -53,42 +53,46 @@ Taken from `git log` and the code:
 ## 5. Detailed checklist
 
 ### A. Setup & configuration
-- [ ] **A1.** Add `fastapi` and `uvicorn` to `requirements.txt`; verify a fresh venv install boots
-- [ ] **A2.** Make `TRUSTED_USERS` tolerate an empty/unset value (currently `int('')` crashes `vars.py`)
-- [ ] **A3.** Decide `USER_GROUP_ID` default (currently `1`, which denies everyone if unset); exempt `OWNER_ID` from the middleware
-- [ ] **A4.** Parse boolean env vars properly (`NO_PORT`, `HAS_SSL`); remove duplicate `WORKERS`
-- [ ] **A5.** Fix `UPDATES_CHANNEL` default (`"None"` string vs `None`) in `start_help.py`
-- [ ] **A6.** Add a sanitized `config.env.example` and document every variable
-- [ ] **A7.** Replace Windows-specific path in `process.json` (or document it as local-only)
-- [ ] **A8.** Ensure `logs/` is created before logging setup on a fresh clone
+- [x] **A1.** `fastapi`/`uvicorn` are in `requirements.txt`
+- [x] **A2.** `TRUSTED_USERS` tolerates empty/unset/comma-or-space-separated (`vars.py`)
+- [x] **A3.** `OWNER_ID` is exempt from the middleware; `USER_GROUP_ID` default `1` is now harmless (`access.group_ids()` only counts negative ids, so an unset/positive value just means "no group configured" instead of denying everyone)
+- [x] **A4.** `NO_PORT`/`HAS_SSL` parsed with `_env_bool` (true/false/1/0/yes/no/on/off); no duplicate `WORKERS`
+- [x] **A5.** `UPDATES_CHANNEL` is `None` when unset/blank/"none" (`_env_text`)
+- [x] **A6.** `config.env.example` now documents every variable `vars.py` reads (`BANNED_CHANNELS`, `SESSION_NAME`, `WORKERS`, `SLEEP_THRESHOLD`, `PING_INTERVAL`, `APP_NAME` added 2026-10-05)
+- [x] **A7.** `process.json` now just runs `python3 start_bot.py` — no Windows path
+- [x] **A8.** `logging_config.py` does `os.makedirs(log_dir, exist_ok=True)` before use
 
 ### B. Features / bot behaviour
-- [x] **B1.** `/login` + `MY_PASS` kept as a feature (not removed); reimplemented without `pyromod`; now a standalone access path independent of admin approval (see F13). Left disabled by default.
-- [ ] **B2.** Restrict `/stats` to owners; align README command list (`status` vs `stats`)
-- [ ] **B3.** Fix broadcast FloodWait handling (`await`, `e.value`) and in `stream.py`
-- [ ] **B4.** Factor the repeated force-subscribe/ban block out of `start`, `help`, `about`, and file handler into one helper
-- [ ] **B5.** Improve the access-denied message (how to get access / contact)
-- [ ] **B6.** Replace original-author branding, donation links and channel links with project-owned ones
+- [x] **B1.** `/login` + `MY_PASS` kept; reimplemented without `pyromod`; standalone access path independent of admin approval (F13). Disabled by default.
+- [x] **B2.** `/stats` (and `/status`) owner-only
+- [x] **B3.** Broadcast FloodWait uses `.value` and is awaited (`broadcast_helper.py`, `stream.py`)
+- [x] **B4.** Force-subscribe/ban block factored into `streamgram.utils.force_subscribe.enforce_updates_channel`, used by `start`/`help`/`about` and `private_receive_handler` (was duplicated 5x; `start_help.py` alone dropped from 317 to 198 lines)
+- [x] **B5.** Access-denied message has the Request Access button and (when `MY_PASS` is set) a `/login` hint
+- [x] Pending decision: **B6** branding/donation/channel links kept as-is for now (§6) — later fully rebranded
 
 ### C. Streaming server
-- [ ] **C1.** Investigate recurring `503 Timedout upload.GetFile` (see `unknown_errors.txt`); stop silently swallowing `TimeoutError` in `yield_file`
-- [ ] **C2.** Stronger link tokens / optional expiry (6-char hash is weak)
-- [ ] **C3.** Only send `Content-Range` on 206 responses
-- [ ] **C4.** Avoid the self-HTTP request in `render_page` for non-media files (use size from `FileId`)
-- [ ] **C5.** Async/buffered request logging; rotate or cap `request_logs.csv`
+- [x] **C1.** `yield_file`'s `except (TimeoutError, AttributeError)` now logs a warning instead of silently passing; the underlying intermittent Telegram DC timeout itself isn't something our code can fix
+- [x] **C2.** New links now carry a random, unguessable token (`streamgram.utils.link_security.LinkTokens`, `secrets.token_urlsafe`, ~72 bits), not a prefix of `file_unique_id`; validated in `stream_routes.py`, `render_template.py` and the `/start <id>_<hash>` deep link. Links issued before this (no token on record) still validate the old way, so nothing already handed out breaks.
+- [x] **C3.** `Content-Range` only sent on 206
+- [x] **C4.** Self-HTTP request removed; uses `FileId.file_size`
+- [x] **C5.** Request logging moved off the event loop (worker thread) and rotates monthly
 
 ### D. Database
-- [ ] **D1.** Single shared `Database` instance instead of four
-- [ ] **D2.** Unique index on `users.id`; avoid duplicate inserts from `add_user_pass`
-- [ ] **D3.** Do not store the plain `MY_PASS` per user (store a flag/token instead)
+- [x] **D1.** `Database.shared(name)` — one client/instance per database name, used everywhere
+- [x] **D2.** Unique index on `users.id` exists; duplicate-insert races are handled (touch() falls back to update on `DuplicateKeyError`)
+- [x] **D3.** `MY_PASS` stored as a SHA-256 token, never the plain password
 
 ### E. Quality & operations
-- [ ] **E1.** Add unit tests (helpers: `chunk_size`, range math, `get_hash`, URI builder)
-- [ ] **E2.** Fix log rotation (`maxBytes` + `backupCount`) and clean existing `logs/`
-- [ ] **E3.** Remove dead code (`file_size.py`, duplicate `readable_time`, placeholder `setup.cfg`/`sonar-project.properties`) or make them real
-- [ ] **E4.** Move `utils_bot.py` into the package
-- [ ] **E5.** Dockerfile / systemd or PM2 instructions for the VPS deployment
-- [ ] **E6.** Move or delete `solution_distances*.py` (unrelated to the bot; currently untracked)
+- [x] **E1.** Test suite now covers range math, hashing, formatting helpers, multi-client startup, keep-alive, branding handlers and the full admin menu (`tests/`, 5 files) — added 2026-10-05
+- [x] **E2.** Log rotation fixed (`LOG_MAX_MB`/`LOG_BACKUPS`); old logs cleaned
+- [x] **E3.** `setup.cfg`/`sonar-project.properties` removed, `file_size.py` gone, and `streamgram/utils/formatting.py` (the duplicate `get_readable_file_size`/`readable_time`) deleted — `/stats` now reuses `human_readable.humanbytes` and `time_format.get_readable_time` like the rest of the app
+- [x] **E4.** No `utils_bot.py` outside the package anymore (removed/merged)
+- [x] **E5.** `Dockerfile` + `.dockerignore` added; `docs/04-deployment.md` covers Docker, systemd and PM2 (couldn't run `docker build` here — no Docker daemon available — so the image itself is untested, only reviewed)
+- [x] **E6.** No `solution_distances*.py` scratch files present
+
+### Found and fixed 2026-10-05 (not in the original review)
+- [x] **N1.** `humanbytes`: fixed the off-by-one-unit bug on exact multiples of 1024 (loop now uses `>=` and is bounded, so it also no longer `KeyError`s past `Ti`).
+- [x] **N2.** `initialize_clients()`: a failed `MULTI_TOKEN_n` client is now skipped (`dict(c for c in clients if c is not None)`) instead of crashing the whole startup.
 
 ### F. Findings from the 2026-10-03 code review (details in `03-code-review-findings.md`) — F1–F5 fixed in code 2026-10-03, offline-tested, **not yet restarted/committed**
 - [x] **F1.** H6 — make the bot recognise the access group; log `PeerIdInvalid`; retry the join-request backfill
@@ -119,7 +123,9 @@ Taken from `git log` and the code:
 
 | Date | What happened |
 |---|---|
-| 2026-10-05 | Owner answered the open questions (§6). Made `/login` + `MY_PASS` a standalone access path independent of admin approval (a ban still wins); removed the now-redundant password gate from `private_receive_handler` and the non-functional one from `channel_receive_handler`; `check_user` now lets `/login` and the password reply through before approval. Feature stays off by default. F10 and M6 resolved per owner decision (F10 done; M6 explicitly skipped). |
+| 2026-10-05 | Added logging across the entire codebase (every module, class and function in `streamgram/`): DEBUG traces for pure helpers and cache hits/misses, INFO for business events (link created, status changes, admin actions, broadcasts, new users), WARNING for recoverable/unexpected conditions, ERROR/`exception` for failures. Replaced two spots that bypassed logging (`traceback.print_exc()` in `keepalive.py`, a bare `logger.error(str(e))` losing the traceback in `stream.py`). Verified no secrets (passwords, tokens, Mongo URI credentials) are ever logged, and confirmed with a live run that `LOG_LEVEL=INFO` stays clean/high-signal while `LOG_LEVEL=DEBUG` reveals the detailed traces. Full test suite still passes. |
+| 2026-10-05 | Fixed everything still open from the checklist: B4 (force-subscribe helper, `utils/force_subscribe.py`), E5 (Dockerfile + `docs/04-deployment.md`), E3 (deleted `utils/formatting.py`, consolidated onto `humanbytes`/`get_readable_time`), A6 (`config.env.example` now lists every variable), C2 (`utils/link_security.py` — real random per-link tokens, legacy links still fall back to the old hash), N1 (`humanbytes` off-by-one-unit), N2 (`initialize_clients()` no longer crashes on one bad `MULTI_TOKEN_n`). M6 explicitly skipped. Tests added for all of the above in `tests/test_full_coverage.py` and `tests/test_expiry_logging_low.py`; full suite (5 files) passes. |
+| 2026-10-05 | Answered the open questions (§6). Made `/login` + `MY_PASS` a standalone access path independent of admin approval (a ban still wins); removed the now-redundant password gate from `private_receive_handler` and the non-functional one from `channel_receive_handler`; `check_user` now lets `/login` and the password reply through before approval. Feature stays off by default. F10 and M6 resolved as decided there (F10 done; M6 explicitly skipped). |
 | 2026-10-03 | Built access system (`utils/access.py`, `plugins/access_admin.py`, middleware + `stream.py` limits). |
 | 2026-10-04 | Monthly rotation of the request CSV (`utils/request_log.py`), old history split into monthly files, test rows removed from the live file, tests isolated from the real logs. |
 | 2026-10-04 | Added automatic link expiry (module `link_expiry.py`, `/admin` → Link expiry, 410 responses); new logging setup and cleanup of 51,786 old log files; fixed Low findings L1–L12; tests in `tests/test_expiry_logging_low.py`. |
