@@ -5,7 +5,7 @@ import html
 import re
 import logging
 logger = logging.getLogger("streamgram.bot.plugins.start_help")
-from streamgram.bot.plugins.stream import MY_PASS
+from streamgram.bot.plugins.stream import MY_PASS, is_logged_in, login_waiting
 from streamgram.utils.human_readable import humanbytes
 from streamgram.utils.database import Database
 from streamgram.utils.access import has_access, access_db, is_exempt
@@ -41,6 +41,10 @@ async def check_user(b: Client, m: Message):
             else "❌ This invite is invalid, expired or not for you."
         )
         raise StopPropagation()
+    # Let an unapproved user reach the password login flow itself: the /login
+    # command, and the password they send right after it.
+    if MY_PASS and (m.chat.id in login_waiting or (m.text and (m.text.startswith("/login") or "login🔑" in m.text))):
+        return
     try:
         allowed, reason = await has_access(b, m.from_user.id)
     except Exception:
@@ -54,14 +58,23 @@ async def check_user(b: Client, m: Message):
             except Exception:
                 logger.exception("Could not record activity")  # bookkeeping only: never block the user
         return
+    # Password login is a standalone access path, independent of admin approval
+    # (but a ban still wins). Off by default; only matters once MY_PASS is set.
+    if reason != "banned" and await is_logged_in(m.from_user.id):
+        return
     if reason == "banned":
         await m.reply_text("🚫 **You are banned from this bot.**")
     elif reason == "pending":
         await m.reply_text("⏳ **Your access request is waiting for approval.** You will be notified.")
     else:
-        await m.reply_text(
+        text = (
             "🔒 **Access Denied**\n\nYou are not authorized to use this bot.\n"
-            "Tap the button below to ask the admin for access.",
+            "Tap the button below to ask the admin for access."
+        )
+        if MY_PASS:
+            text += "\n\nOr, if you have the password, send /login."
+        await m.reply_text(
+            text,
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔑 Request Access", callback_data="req:access")]]),
         )
     raise StopPropagation()

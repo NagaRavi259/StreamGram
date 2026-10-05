@@ -63,7 +63,7 @@ Taken from `git log` and the code:
 - [ ] **A8.** Ensure `logs/` is created before logging setup on a fresh clone
 
 ### B. Features / bot behaviour
-- [ ] **B1.** Decide on `/login` + `MY_PASS`: re-enable `pyromod` (or reimplement with a conversation/state dict) or remove the feature
+- [x] **B1.** `/login` + `MY_PASS` kept as a feature (not removed); reimplemented without `pyromod`; now a standalone access path independent of admin approval (see F13). Left disabled by default.
 - [ ] **B2.** Restrict `/stats` to owners; align README command list (`status` vs `stats`)
 - [ ] **B3.** Fix broadcast FloodWait handling (`await`, `e.value`) and in `stream.py`
 - [ ] **B4.** Factor the repeated force-subscribe/ban block out of `start`, `help`, `about`, and file handler into one helper
@@ -102,20 +102,24 @@ Taken from `git log` and the code:
 - [x] **F9.** Automatic link expiry (default unlimited, per-user override, admin menu) and Low findings L1–L12 (not yet pushed)
 - [x] **F11.** Logging reorganised (info.log / error.log, `LOG_LEVEL=INFO`), old logs cleaned, duplicate users removed, unique index added
 - [x] **F12.** Request CSV rotates monthly, history preserved
-- [ ] **F10.** Add the bot to the access group as admin so group membership checks work
+- [x] **F10.** Add the bot to the access group as admin so group membership checks work — done directly
+- [x] **F13.** `/login` + `MY_PASS` made a standalone access path: a logged-in user bypasses the admin-approval/access-group system entirely (a ban still wins); kept **disabled by default** (`MY_PASS` unset), turned on when needed. `tests/test_medium_fixes.py` covers bypass, ban-wins, and that `/login` + the password reply are reachable before approval.
 
-## 6. Open questions for the owner
+## 6. Open questions — answered 2026-10-05
 
-1. Which environment is the real deployment — this Linux box, a Windows PC (PM2 path), or Heroku/Railway?
-2. Should `OWNER_ID` users bypass the group-membership check automatically?
-3. Is password login (`MY_PASS`) still wanted now that group-based authorization exists?
-4. Should links stay permanent, or do you want expiry/revocation?
-5. Is the upstream branding meant to stay?
+1. Deployment target: run anywhere Python runs; no single fixed target. **Decision kept.**
+2. `OWNER_ID` bypass: already exempt from the group-membership check and from usage limits.
+3. Password login: **keep it**, as a standalone way in that doesn't need admin approval — not a second gate on top of it. **Left disabled** (`MY_PASS` unset) until turned on. Implemented in F13.
+4. Links: **keep expiry configurable** (default unlimited, per-user override) — managed from `/admin` → Link expiry as needed.
+5. Branding/donation/channel links: **keep as-is** for now; to revisit later.
+
+(M6 — inviting an unknown numeric ID by `/admin` — explicitly skipped, not being fixed.)
 
 ## 7. Log
 
 | Date | What happened |
 |---|---|
+| 2026-10-05 | Owner answered the open questions (§6). Made `/login` + `MY_PASS` a standalone access path independent of admin approval (a ban still wins); removed the now-redundant password gate from `private_receive_handler` and the non-functional one from `channel_receive_handler`; `check_user` now lets `/login` and the password reply through before approval. Feature stays off by default. F10 and M6 resolved per owner decision (F10 done; M6 explicitly skipped). |
 | 2026-10-03 | Built access system (`utils/access.py`, `plugins/access_admin.py`, middleware + `stream.py` limits). |
 | 2026-10-04 | Monthly rotation of the request CSV (`utils/request_log.py`), old history split into monthly files, test rows removed from the live file, tests isolated from the real logs. |
 | 2026-10-04 | Added automatic link expiry (module `link_expiry.py`, `/admin` → Link expiry, 410 responses); new logging setup and cleanup of 51,786 old log files; fixed Low findings L1–L12; tests in `tests/test_expiry_logging_low.py`. |

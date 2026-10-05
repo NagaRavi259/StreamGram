@@ -33,6 +33,14 @@ pass_dict = {}
 pass_db = Database.shared("ag_passwords")
 
 
+async def is_logged_in(user_id) -> bool:
+    """Password login is a standalone access path: logging in grants use of the
+    bot on its own, independent of the admin-approval / access-group system."""
+    if not MY_PASS:
+        return False
+    return await pass_db.get_user_pass(user_id) == pass_token(MY_PASS)
+
+
 login_waiting = {}  # chat_id -> time until which the next text message is treated as the password
 
 
@@ -71,14 +79,8 @@ async def login_password_handler(c: Client, m: Message):
 
 @StreamBot.on_message((filters.private) & (filters.document | filters.video | filters.audio | filters.photo) , group=4)
 async def private_receive_handler(c: Client, m: Message):
-    if MY_PASS:
-        check_pass = await pass_db.get_user_pass(m.chat.id)
-        if check_pass== None:
-            await m.reply_text("Login first using /login cmd \nDon't know the password contact @ArjunVR_AVR")
-            return
-        if check_pass != pass_token(MY_PASS):
-            await pass_db.delete_user(m.chat.id)
-            return
+    # Access (admin-approved OR password-logged-in) was already decided by
+    # start_help.check_user before this handler runs; no separate gate here.
     if not await db.is_user_exist(m.from_user.id):
         await db.add_user(m.from_user.id)
         await c.send_message(
@@ -190,15 +192,6 @@ async def channel_receive_handler(bot, broadcast):
     if sponsor is None:
         logger.info(f"Ignoring channel {broadcast.chat.id}: none of its admins has access to the bot")
         return
-    if MY_PASS:
-        check_pass = await pass_db.get_user_pass(broadcast.chat.id)
-        if check_pass == None:
-            await broadcast.reply_text("Login first using /login cmd \n don\'t know the pass? ask the bot owner")
-            return
-        if check_pass != pass_token(MY_PASS):
-            await broadcast.reply_text("Wrong password, login again")
-            await pass_db.delete_user(broadcast.chat.id)
-            return
     try:
         allowed, limit_msg, reservation = await access_db.reserve(sponsor)
     except Exception:

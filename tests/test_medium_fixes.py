@@ -80,6 +80,33 @@ async def main():
     db.touch = real_touch; sh.has_access = real_has
     print("M2 ok: DB failure -> friendly reply; bookkeeping failure ignored")
 
+    # ---- password login is a standalone access path, independent of admin approval
+    from streamgram.bot.plugins import stream as stm
+    stm.MY_PASS = "secret"
+    async def denied(c, uid): return False, None
+    sh.has_access = denied
+    class PD:
+        async def get_user_pass(s, uid): return stm.pass_token("secret")
+    real_pass_db = stm.pass_db; stm.pass_db = PD()
+    m3 = Recorder(from_user=user(9), text="hi", chat=types.SimpleNamespace(id=9))
+    assert await sh.check_user(Recorder(), m3) is None and not m3.sent        # logged-in -> bypasses admin approval
+    async def banned(c, uid): return False, "banned"
+    sh.has_access = banned
+    m4b = Recorder(from_user=user(9), text="hi", chat=types.SimpleNamespace(id=9))
+    try:
+        await sh.check_user(Recorder(), m4b); raise SystemExit("StopPropagation expected")
+    except StopPropagation:
+        assert m4b.sent and "banned" in m4b.sent[0][0].lower()                # a ban still wins over password login
+    sh.has_access = denied
+    m5 = Recorder(from_user=user(9), text="/login", chat=types.SimpleNamespace(id=9))
+    assert await sh.check_user(Recorder(), m5) is None and not m5.sent        # /login reachable before approval
+    stm.login_waiting[9] = time.time() + 90
+    m6 = Recorder(from_user=user(9), text="secret", chat=types.SimpleNamespace(id=9))
+    assert await sh.check_user(Recorder(), m6) is None and not m6.sent        # the password reply too
+    del stm.login_waiting[9]
+    stm.MY_PASS = None; stm.pass_db = real_pass_db; sh.has_access = real_has
+    print("password login ok: bypasses admin approval, a ban still wins, /login flow reachable")
+
     # ---- M4: cooldown after reject / revoke
     install_fakes(db)
     await db.users.insert_one({"id": 5, "status": "rejected", "updated_at": int(time.time())})
