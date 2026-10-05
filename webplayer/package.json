@@ -1,0 +1,9 @@
+{
+  "name": "file-to-link-webplayer",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test:unit": "node --test test/unit/*.test.mjs",
+    "test:e2e": "node test/e2e/run.mjs"
+  }
+}

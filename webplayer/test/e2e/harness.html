@@ -1,0 +1,28 @@
+<!doctype html>
+<html>
+<head><meta charset="utf-8"><title>webplayer e2e harness</title></head>
+<body>
+<video id="v" muted playsinline style="width:320px;height:240px"></video>
+<div id="subtitle" style="font-family:monospace"></div>
+<script type="module">
+  import { createPlayer } from "/src/webplayer.mjs";
+
+  window.__ready = createPlayer({
+    videoEl: document.getElementById("v"),
+    url: "/test/fixtures/fixture.webm",
+  })
+    .then((player) => {
+      window.__player = player;
+      const sub = document.getElementById("subtitle");
+      setInterval(() => {
+        sub.textContent = player.subtitleText;
+      }, 50);
+      return player;
+    })
+    .catch((e) => {
+      window.__error = String((e && e.stack) || e);
+      throw e;
+    });
+</script>
+</body>
+</html>
