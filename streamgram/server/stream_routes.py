@@ -170,15 +170,21 @@ async def media_streamer(request: Request, id: int, secure_hash: str):
     # over loopback to do its work; that self-call carries this header so it never recurses into
     # itself. A real browser/viewer request never sends it.
     is_internal_call = request.headers.get(audio_fix.INTERNAL_HEADER_NAME) == "1"
-    if (
-        not is_internal_call
-        and Var.ENABLE_AUDIO_FIX
-        and (file_id.mime_type or "").split("/")[0] == "video"
-    ):
-        plan = await audio_fix.get_audio_fix_plan(id, secure_hash)
+    # ?audiofix=1/true/on forces the transcode path on, ?audiofix=0/false/off forces it off,
+    # regardless of auto-detection — the two comparison links the bot sends use these explicitly
+    # so a viewer (or we, debugging) can tell "the original" and "the fixed" apart deterministically.
+    audiofix_param = (request.query_params.get("audiofix") or "").strip().lower()
+    force_audio_fix = (
+        True if audiofix_param in ("1", "true", "on")
+        else False if audiofix_param in ("0", "false", "off")
+        else None
+    )
+    is_video_kind = (file_id.mime_type or "").split("/")[0] == "video"
+    if not is_internal_call and is_video_kind and (force_audio_fix is not None or Var.ENABLE_AUDIO_FIX):
+        plan = await audio_fix.get_audio_fix_plan(id, secure_hash, force=force_audio_fix)
         if plan["needs_fix"]:
             try:
-                await audio_fix.begin_transcode()
+                audio_fix.begin_transcode()
             except audio_fix.TranscodeBusy:
                 logger.warning(
                     "media_streamer(%s): audio-fix transcode slots full, falling back to plain "
@@ -189,7 +195,7 @@ async def media_streamer(request: Request, id: int, secure_hash: str):
                     proc = await audio_fix.start_ffmpeg_transcode(id, secure_hash, plan["audio_track_index"])
                 except Exception:
                     logger.exception("media_streamer(%s): failed to start ffmpeg, falling back to passthrough", id)
-                    await audio_fix.end_transcode()
+                    audio_fix.end_transcode()
                 else:
                     logger.info("media_streamer(%s): streaming with audio fixed (unsupported codec -> AAC)", id)
                     body = audio_fix.stream_ffmpeg_output(proc, request, id)

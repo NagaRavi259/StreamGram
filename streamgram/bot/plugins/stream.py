@@ -120,6 +120,11 @@ async def private_receive_handler(c: Client, m: Message):
         logger.info("private_receive_handler(): link created for %s -> bin message %s", m.from_user.id, log_msg.id)
 
         stream_link = f"{Var.URL}watch/{str(log_msg.id)}/?hash={token}"
+        # Same watch page, but with the audio-fix pass forced on/off explicitly (see
+        # streamgram/utils/audio_fix.py) instead of left to auto-detection — two deterministic links
+        # so the original (video-only on an unsupported audio codec) and the fixed (audio
+        # re-encoded to AAC) version of the same file can be compared side by side.
+        stream_link_audiofix = f"{stream_link}&audiofix=1"
 
         online_link = f"{Var.URL}{str(log_msg.id)}/?hash={token}"
 
@@ -138,10 +143,12 @@ async def private_receive_handler(c: Client, m: Message):
 
 <b>🖥 Watch online:</b> <i><b>{}</b></i>
 
+<b>🔊 Watch (audio fixed):</b> <i><b>{}</b></i>
+
 <b>♻️ This link is permanent and won't expire ♻️</b>"""
 
         await log_msg.reply_text(text=f"**RᴇQᴜᴇꜱᴛᴇᴅ ʙʏ :** [{m.from_user.first_name}](tg://user?id={m.from_user.id})\n**Uꜱᴇʀ ɪᴅ :** `{m.from_user.id}`\n**Stream ʟɪɴᴋ :** {stream_link}", disable_web_page_preview=True, quote=True)
-        link_text = msg_text.format(get_name(log_msg), humanbytes(get_media_file_size(m)), online_link, stream_link)
+        link_text = msg_text.format(get_name(log_msg), humanbytes(get_media_file_size(m)), online_link, stream_link, stream_link_audiofix)
         if expires_at:  # replace the 'permanent' note
             link_text = re.sub(r"♻️[^♻]*♻️", f"⏳ This link expires in {fmt_duration(round(expires_at - time.time()))} ⏳", link_text, count=1)
         await m.reply_text(
@@ -151,7 +158,8 @@ async def private_receive_handler(c: Client, m: Message):
             quote=True,
             disable_web_page_preview=True,
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⚡ ᴡᴀᴛᴄʜ ⚡", url=stream_link), #Stream Link
-                                                InlineKeyboardButton('⚡ ᴅᴏᴡɴʟᴏᴀᴅ ⚡', url=online_link)]]) #Download Link
+                                                InlineKeyboardButton('⚡ ᴅᴏᴡɴʟᴏᴀᴅ ⚡', url=online_link)], #Download Link
+                                               [InlineKeyboardButton("🔊 ᴡᴀᴛᴄʜ (ᴀᴜᴅɪᴏ ғɪxᴇᴅ) 🔊", url=stream_link_audiofix)]])
         )
     except FloodWait as e:
         await access_db.refund(reservation)  # no link was delivered, so it must not count
@@ -196,6 +204,7 @@ async def channel_receive_handler(bot, broadcast):
         logger.info("channel_receive_handler(): link created for channel %s (sponsor %s) -> bin message %s",
                     broadcast.chat.id, sponsor, log_msg.id)
         stream_link = f"{Var.URL}watch/{str(log_msg.id)}/{quote_plus(get_name(log_msg))}?hash={token}"
+        stream_link_audiofix = f"{stream_link}&audiofix=1"
         online_link = f"{Var.URL}{str(log_msg.id)}/{quote_plus(get_name(log_msg))}?hash={token}"
         await log_msg.reply_text(
             text=f"**Cʜᴀɴɴᴇʟ Nᴀᴍᴇ:** `{broadcast.chat.title}`\n**Cʜᴀɴɴᴇʟ ID:** `{broadcast.chat.id}`\n**Rᴇǫᴜᴇsᴛ ᴜʀʟ:** {stream_link}",
@@ -207,7 +216,8 @@ async def channel_receive_handler(bot, broadcast):
             reply_markup=InlineKeyboardMarkup(
                 [
                     [InlineKeyboardButton("⚡ ᴡᴀᴛᴄʜ ⚡", url=stream_link),
-                     InlineKeyboardButton('⚡ ᴅᴏᴡɴʟᴏᴀᴅ ⚡', url=online_link)]
+                     InlineKeyboardButton('⚡ ᴅᴏᴡɴʟᴏᴀᴅ ⚡', url=online_link)],
+                    [InlineKeyboardButton("🔊 ᴡᴀᴛᴄʜ (ᴀᴜᴅɪᴏ ғɪxᴇᴅ) 🔊", url=stream_link_audiofix)],
                 ]
             )
         )

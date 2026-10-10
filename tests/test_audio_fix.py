@@ -69,18 +69,29 @@ async def main():
         assert fine not in audio_fix.UNSUPPORTED_AUDIO_CODECS, fine
     print("U1 ok: unsupported-codec list contains the Dolby/DTS set, not ordinary codecs")
 
-    # ---------- unit: concurrency gate
+    # ---------- unit: concurrency gate (fully synchronous: see the module docstring on why —
+    # a cancelled cleanup must never be able to skip releasing a slot)
     audio_fix._gate = None  # force a fresh gate at the test's MAX_CONCURRENT_AUDIO_FIX=1
-    await audio_fix.begin_transcode()
+    audio_fix.begin_transcode()
     try:
-        await audio_fix.begin_transcode()
+        audio_fix.begin_transcode()
         raise SystemExit("second begin_transcode should have raised TranscodeBusy")
     except audio_fix.TranscodeBusy:
         pass
-    await audio_fix.end_transcode()
-    await audio_fix.begin_transcode()  # slot freed, should succeed again
-    await audio_fix.end_transcode()
+    audio_fix.end_transcode()
+    audio_fix.begin_transcode()  # slot freed, should succeed again
+    audio_fix.end_transcode()
     print("U2 ok: concurrency gate enforces MAX_CONCURRENT_AUDIO_FIX and frees slots")
+
+    # ---------- unit: force=True/False bypass probing entirely and skip the cache
+    real_exec = asyncio.create_subprocess_exec  # captured before any monkeypatching below
+    real_tools_available = audio_fix.tools_available
+    audio_fix.clear_probe_cache()
+    asyncio.create_subprocess_exec = None  # force=True/False must never spawn ffprobe
+    assert await audio_fix.get_audio_fix_plan(201, "h", force=False) == audio_fix.NO_FIX_PLAN
+    assert await audio_fix.get_audio_fix_plan(201, "h", force=True) == audio_fix.FORCED_FIX_PLAN
+    assert 201 not in audio_fix._probe_cache  # forced results are never cached
+    print("U2b ok: force=True/False short-circuit probing deterministically, uncached")
 
     # ---------- unit: get_audio_fix_plan, mocked ffprobe (no real process)
     audio_fix.clear_probe_cache()
@@ -94,8 +105,6 @@ async def main():
             return P()
         return fake_exec
 
-    real_exec = asyncio.create_subprocess_exec
-    real_tools_available = audio_fix.tools_available
     audio_fix.tools_available = lambda: True
 
     # default-flagged E-AC3 track should be picked over a non-default AAC track that sorts first
@@ -138,6 +147,45 @@ async def main():
     asyncio.create_subprocess_exec = real_exec
     audio_fix.tools_available = real_tools_available
     audio_fix.clear_probe_cache()
+
+    # ---------- unit: the transcode slot is released even when the stream is cancelled mid-read
+    # (the actual bug that caused "worked once, never again" in production: an async-lock-based
+    # gate release could itself be skipped by cancellation, permanently wedging every slot).
+    class FakeStream:
+        async def read(self, n):
+            await asyncio.sleep(3600)  # never produces data on its own
+        async def readline(self):
+            await asyncio.sleep(3600)
+
+    class FakeProc:
+        def __init__(self):
+            self.stdout = FakeStream()
+            self.stderr = FakeStream()
+            self.returncode = None
+            self.pid = -1
+        def kill(self):
+            self.returncode = -9
+        async def wait(self):
+            return self.returncode
+
+    class FakeRequest:
+        async def is_disconnected(self):
+            return False
+
+    audio_fix._gate = None
+    audio_fix.begin_transcode()
+    assert audio_fix._gate._count == 1
+    gen = audio_fix.stream_ffmpeg_output(FakeProc(), FakeRequest(), 999)
+    task = asyncio.ensure_future(gen.__anext__())
+    await asyncio.sleep(0.1)  # let it reach the stdout.read() await
+    task.cancel()
+    try:
+        await task
+        raise SystemExit("expected the cancelled task to raise CancelledError")
+    except asyncio.CancelledError:
+        pass
+    assert audio_fix._gate._count == 0, "transcode slot leaked after cancellation"
+    print("U8 ok: the transcode slot is freed even when the stream is cancelled mid-read")
 
     if not HAVE_FFMPEG:
         print("SKIP: real ffmpeg/ffprobe not found on PATH, skipping the end-to-end check")
@@ -252,6 +300,20 @@ async def main():
         assert r3.headers.get("content-type") == "video/x-matroska", r3.headers
         assert r3.content == fixture_bytes
         print("E5 ok: the internal-call marker header bypasses the fix branch (no recursion)")
+
+        # ?audiofix=0 must force the plain original through, even though auto-detect would fix it
+        r4 = requests.get(f"{base}/{msg_id}?hash={secure_hash}&audiofix=0", timeout=30)
+        assert r4.status_code == 200
+        assert r4.headers.get("content-type") == "video/x-matroska", r4.headers
+        assert r4.content == fixture_bytes
+        print("E6 ok: ?audiofix=0 forces the original (unfixed) stream, for comparison")
+
+        # ?audiofix=1 must force the fixed version through deterministically
+        r5 = requests.get(f"{base}/{msg_id}?hash={secure_hash}&audiofix=1", timeout=30)
+        assert r5.status_code == 200
+        assert r5.headers.get("content-type") == "video/mp4", r5.headers
+        assert len(r5.content) > 1000
+        print("E7 ok: ?audiofix=1 forces the fixed stream, for comparison")
     finally:
         server.should_exit = True
         thread.join(timeout=10)
