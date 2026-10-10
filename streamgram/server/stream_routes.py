@@ -181,9 +181,20 @@ async def media_streamer(request: Request, id: int, secure_hash: str):
         start_seconds = max(0.0, float(request.query_params.get("start") or 0))
     except ValueError:
         start_seconds = 0.0
+    # ?atrack=<N>: an explicit audio-track pick from the language selector on the seek-capable
+    # player — always routes through the fixed pipeline for that track (see get_audio_fix_plan).
+    try:
+        atrack_raw = request.query_params.get("atrack")
+        audio_track_override = int(atrack_raw) if atrack_raw is not None else None
+    except ValueError:
+        audio_track_override = None
     is_video_kind = (file_id.mime_type or "").split("/")[0] == "video"
-    if not is_internal_call and is_video_kind and (force_audio_fix is not None or Var.ENABLE_AUDIO_FIX):
-        plan = await audio_fix.get_audio_fix_plan(id, secure_hash, force=force_audio_fix)
+    if not is_internal_call and is_video_kind and (
+        audio_track_override is not None or force_audio_fix is not None or Var.ENABLE_AUDIO_FIX
+    ):
+        plan = await audio_fix.get_audio_fix_plan(
+            id, secure_hash, force=force_audio_fix, audio_track_index=audio_track_override
+        )
         if plan["needs_fix"]:
             try:
                 audio_fix.begin_transcode()

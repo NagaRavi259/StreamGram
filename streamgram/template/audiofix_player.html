@@ -36,6 +36,11 @@
         #seek { flex: 1 1 260px; min-width: 160px; accent-color: #6c8cff; }
         #vol { width: 80px; accent-color: #6c8cff; }
         #time-label { font-size: 13px; color: #bbb; min-width: 108px; text-align: right; }
+        #audio-track {
+            background: #1d1d22; color: #eee; border: 1px solid #333; border-radius: 6px;
+            height: 34px; padding: 0 6px; font-size: 13px; max-width: 160px;
+        }
+        #audio-track:empty, #audio-track[data-hidden] { display: none; }
         .note {
             font-size: 12.5px; color: #9a9a9a; padding: 0 6px 10px; line-height: 1.5;
         }
@@ -67,6 +72,7 @@
             <span id="time-label">00:00 / 00:00</span>
             <span>🔊</span>
             <input type="range" id="vol" min="0" max="1" step="0.05" value="1">
+            <select id="audio-track" title="Audio language"></select>
             <button id="fs-btn" title="Fullscreen">⛶</button>
         </div>
         <div class="note">
@@ -87,12 +93,32 @@
         var fsBtn = document.getElementById('fs-btn');
         var errorBanner = document.getElementById('error-banner');
         var retryBtn = document.getElementById('retry-btn');
+        var trackSelect = document.getElementById('audio-track');
 
         var totalDuration = %s;
         var baseStreamUrl = %s;
+        var audioTracks = %s;      // [{index, language, title, codec, default}, ...]
+        var currentTrackIndex = %s; // the per-type audio index currently playing
         var baseOffset = 0;      // seconds: the `start=` value of the segment currently loading/loaded
         var seeking = false;     // true while the user is dragging the seek bar
         var wantPlaying = false; // whether playback should resume once the new segment is ready
+
+        function trackLabel(t) {
+            var lang = (t.language || 'und').toUpperCase();
+            return t.title ? (lang + ' — ' + t.title) : lang;
+        }
+
+        if (audioTracks.length > 1) {
+            audioTracks.forEach(function (t) {
+                var opt = document.createElement('option');
+                opt.value = String(t.index);
+                opt.textContent = trackLabel(t);
+                if (t.index === currentTrackIndex) opt.selected = true;
+                trackSelect.appendChild(opt);
+            });
+        } else {
+            trackSelect.setAttribute('data-hidden', '');
+        }
 
         function fmtTime(s) {
             if (!isFinite(s) || s < 0) s = 0;
@@ -105,7 +131,8 @@
 
         function streamUrlAt(offsetSeconds) {
             var sep = baseStreamUrl.indexOf('?') === -1 ? '?' : '&';
-            return baseStreamUrl + sep + 'start=' + encodeURIComponent(Math.max(0, offsetSeconds));
+            return baseStreamUrl + sep + 'start=' + encodeURIComponent(Math.max(0, offsetSeconds)) +
+                '&atrack=' + encodeURIComponent(currentTrackIndex);
         }
 
         function loadAt(offsetSeconds, autoplay) {
@@ -122,7 +149,12 @@
             }
         }
 
+        // 'canplay'/'loadeddata' fire once the video is actually ready to play, whether or not
+        // playback has started yet — without this, a freshly-loaded-but-still-paused video (no
+        // autoplay) shows the loading spinner forever even though pressing play works instantly.
         video.addEventListener('playing', function () { videoBox.classList.remove('loading'); });
+        video.addEventListener('canplay', function () { videoBox.classList.remove('loading'); });
+        video.addEventListener('loadeddata', function () { videoBox.classList.remove('loading'); });
         video.addEventListener('waiting', function () { videoBox.classList.add('loading'); });
         video.addEventListener('error', function () {
             videoBox.classList.remove('loading');
@@ -153,6 +185,15 @@
         video.addEventListener('pause', function () { playBtn.textContent = '▶'; });
 
         volBar.addEventListener('input', function () { video.volume = Number(volBar.value); });
+
+        trackSelect.addEventListener('change', function () {
+            var newIndex = Number(trackSelect.value);
+            if (newIndex === currentTrackIndex) return;
+            currentTrackIndex = newIndex;
+            var resumeAt = baseOffset + video.currentTime;
+            var wasPlaying = !video.paused;
+            loadAt(resumeAt, wasPlaying);
+        });
 
         fsBtn.addEventListener('click', function () {
             if (video.requestFullscreen) video.requestFullscreen();

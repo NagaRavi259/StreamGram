@@ -200,8 +200,13 @@ async def main():
             "ffmpeg", "-y", "-v", "error",
             "-f", "lavfi", "-i", f"testsrc2=size=320x240:rate=10:duration={FIXTURE_DURATION}",
             "-f", "lavfi", "-i", f"sine=frequency=440:duration={FIXTURE_DURATION}",
+            "-f", "lavfi", "-i", f"sine=frequency=523:duration={FIXTURE_DURATION}",
+            "-map", "0:v", "-map", "1:a", "-map", "2:a",
             "-c:v", "libx264", "-pix_fmt", "yuv420p", "-g", "10", "-keyint_min", "10",
             "-c:a", "eac3", "-b:a", "192k",
+            "-metadata:s:a:0", "language=eng", "-metadata:s:a:0", "title=English",
+            "-metadata:s:a:1", "language=tel", "-metadata:s:a:1", "title=Telugu",
+            "-disposition:a:0", "default", "-disposition:a:1", "0",
             "-f", "matroska", fixture_path,
         ],
         check=True,
@@ -316,10 +321,17 @@ async def main():
         assert len(r5.content) > 1000
         print("E7 ok: ?audiofix=1 forces the fixed stream, for comparison")
 
-        # ---------- duration probing (what makes the seek-capable player's bar correct)
-        duration = await audio_fix.probe_duration_seconds(msg_id, secure_hash)
+        # ---------- duration + track-list probing (what makes the seek-capable player's bar and
+        # language picker correct)
+        media_info = await audio_fix.probe_media_info(msg_id, secure_hash)
+        assert media_info is not None
+        duration = media_info["duration"]
         assert duration is not None and abs(duration - FIXTURE_DURATION) < 0.5, duration
-        print(f"E8 ok: probe_duration_seconds reports ~{duration:.1f}s for a {FIXTURE_DURATION}s fixture")
+        tracks = media_info["audio_tracks"]
+        assert [t["language"] for t in tracks] == ["eng", "tel"], tracks
+        assert tracks[0]["default"] is True and tracks[1]["default"] is False, tracks
+        assert all(t["codec"] == "eac3" for t in tracks), tracks
+        print(f"E8 ok: probe_media_info reports ~{duration:.1f}s duration and both audio tracks correctly")
 
         # ---------- ?start=N actually seeks: output should cover roughly [N, duration], not the
         # whole file again (the actual feature being added here, no disk cache: a seek just
@@ -341,6 +353,47 @@ async def main():
         assert decode2.returncode == 0 and decode2.stderr == b"", decode2.stderr
         print(f"E9 ok: ?start={seek_to} yields ~{seek_duration:.1f}s of output (expected ~{expected_remaining}s), decodes cleanly")
 
+        # ---------- audio/video stay aligned at a seek point that does NOT land on a keyframe
+        # (keyframes are every 1s; seeking to 3.4s is the case that actually exercises the
+        # copy-video/transcode-audio drift this is fixing — seeking to an exact keyframe would
+        # pass even without the fix, which would be testing the wrong thing)
+        seek_offset = 3.4
+        r7 = requests.get(f"{base}/{msg_id}?hash={secure_hash}&audiofix=1&start={seek_offset}", timeout=30)
+        assert r7.status_code == 200
+        offbeat_path = os.path.join(tmp_dir, "offbeat_seek.mp4")
+        with open(offbeat_path, "wb") as f:
+            f.write(r7.content)
+
+        def first_packet_pts(path, stream):
+            p = subprocess.run(
+                ["ffprobe", "-v", "error", "-select_streams", stream, "-show_entries", "packet=pts_time",
+                 "-of", "csv=p=0", path],
+                capture_output=True, check=True, text=True,
+            )
+            return float(p.stdout.strip().splitlines()[0])
+
+        first_video_pts = first_packet_pts(offbeat_path, "v:0")
+        first_audio_pts = first_packet_pts(offbeat_path, "a:0")
+        av_gap = abs(first_video_pts - first_audio_pts)
+        assert av_gap < 0.3, f"audio/video start {av_gap:.2f}s apart (video={first_video_pts}, audio={first_audio_pts})"
+        print(f"E12 ok: seeking to a non-keyframe point ({seek_offset}s) keeps audio/video aligned (gap {av_gap:.2f}s)")
+
+        # ---------- ?atrack=1 picks the second (Telugu) audio track instead of the default (eng),
+        # and always routes through the fixed pipeline regardless of ?audiofix
+        r8 = requests.get(f"{base}/{msg_id}?hash={secure_hash}&atrack=1", timeout=30)
+        assert r8.status_code == 200 and r8.headers.get("content-type") == "video/mp4"
+        atrack_path = os.path.join(tmp_dir, "atrack.mp4")
+        with open(atrack_path, "wb") as f:
+            f.write(r8.content)
+        atrack_probe = subprocess.run(
+            ["ffprobe", "-v", "error", "-print_format", "json", "-show_streams", atrack_path],
+            capture_output=True, check=True,
+        )
+        atrack_streams = json.loads(atrack_probe.stdout)["streams"]
+        atrack_audio = next(s for s in atrack_streams if s["codec_type"] == "audio")
+        assert atrack_audio["codec_name"] == "aac"  # still fixed, just the other source track
+        print("E13 ok: ?atrack=1 switches to the second audio track through the same fixed pipeline")
+
         # ---------- the watch page uses the seek-capable custom player when the fix applies,
         # and the plain Plyr-based page when it's forced off
         async def get_file_ids(client, chat, mid):
@@ -355,7 +408,10 @@ async def main():
         assert f"start=' + encodeURIComponent" in body  # the seek-reload logic is present
         assert f"&amp;audiofix=1" not in body  # the embedded stream URL must be the raw (unescaped) one
         assert "&audiofix=1" in body
-        print("E10 ok: watch page renders the seek-capable custom player when the fix applies")
+        assert "var audioTracks" in body and "var currentTrackIndex" in body
+        assert '"language": "eng"' in body and '"language": "tel"' in body
+        assert "var currentTrackIndex = 0;" in body  # eng is the disposition-default track
+        print("E10 ok: watch page renders the seek-capable custom player with both audio tracks")
 
         watch_plain = requests.get(f"{base}/watch/{msg_id}/?hash={secure_hash}&audiofix=0", timeout=30)
         assert watch_plain.status_code == 200

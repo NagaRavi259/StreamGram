@@ -128,36 +128,42 @@ def end_transcode():
 # in stream_routes.py). Only the auto-detect path (force=None) is cached — forced requests are
 # explicit test/comparison links and always take the same deterministic path, no probe involved.
 _probe_cache = {}
+_media_info_cache = {}
 
 NO_FIX_PLAN = {"needs_fix": False, "audio_track_index": None}
 FORCED_FIX_PLAN = {"needs_fix": True, "audio_track_index": 0}
 
 
-_duration_cache = {}
-
-
 def clear_probe_cache():
     """Test-only hook; production never needs to evict a cached plan."""
     _probe_cache.clear()
-    _duration_cache.clear()
+    _media_info_cache.clear()
 
 
-async def probe_duration_seconds(id, secure_hash):
-    """Returns the file's total duration in seconds (float), or None if it can't be determined
-    (ffprobe missing/failed, or no duration in the container). Cached per file id.
+async def probe_media_info(id, secure_hash):
+    """Returns {"duration": float|None, "audio_tracks": [{"index", "language", "title", "codec",
+    "default"}, ...]} in one ffprobe call, or None if probing fails entirely (ffprobe missing,
+    timed out, bad output). Cached per file id.
 
-    Used only to render the seek-capable custom player (see streamgram/template/audiofix_player.html):
-    since a re-transcoded-per-seek stream can't report its own total duration (each request only
-    covers [seek point, end of file]), the watch page is told the real duration once upfront and
-    builds its own seek bar/position display from that instead of trusting the <video> element's.
+    "index" is the ffmpeg per-type stream index (what `-map 0:a:N` expects), in the same order
+    ffmpeg itself enumerates audio streams.
+
+    Used for two things: the seek-capable custom player needs the real duration up front since a
+    re-transcoded-per-seek stream can't report its own total duration (each request only covers
+    [seek point, end of file]) — see streamgram/template/audiofix_player.html; and the audio-track
+    (language) picker on that same page needs the full track list, not just the one that would be
+    auto-selected.
     """
-    if id in _duration_cache:
-        return _duration_cache[id]
+    if id in _media_info_cache:
+        return _media_info_cache[id]
     if not tools_available():
-        _duration_cache[id] = None
+        _media_info_cache[id] = None
         return None
     url = self_url(id, secure_hash)
-    cmd = ["ffprobe", "-v", "error", "-print_format", "json", "-show_format", "-headers", INTERNAL_HEADER_LINE, url]
+    cmd = [
+        "ffprobe", "-v", "error", "-print_format", "json", "-show_format", "-show_streams",
+        "-headers", INTERNAL_HEADER_LINE, url,
+    ]
     started = time.monotonic()
     try:
         proc = await asyncio.create_subprocess_exec(
@@ -166,41 +172,68 @@ async def probe_duration_seconds(id, secure_hash):
         out, err = await asyncio.wait_for(proc.communicate(), timeout=PROBE_TIMEOUT_SECONDS)
     except Exception:
         logger.warning(
-            "probe_duration_seconds(%s): ffprobe failed to run after %.1fs", id, time.monotonic() - started,
-            exc_info=True,
+            "probe_media_info(%s): ffprobe failed to run after %.1fs", id, time.monotonic() - started, exc_info=True
         )
-        _duration_cache[id] = None
+        _media_info_cache[id] = None
         return None
     if proc.returncode != 0:
-        logger.warning("probe_duration_seconds(%s): ffprobe exited %s: %s", id, proc.returncode, (err or b"")[-2000:])
-        _duration_cache[id] = None
+        logger.warning("probe_media_info(%s): ffprobe exited %s: %s", id, proc.returncode, (err or b"")[-2000:])
+        _media_info_cache[id] = None
         return None
     try:
         data = json.loads(out or b"{}")
-        duration = float(data["format"]["duration"])
-    except (KeyError, ValueError, TypeError, json.JSONDecodeError):
-        logger.warning("probe_duration_seconds(%s): no usable duration in ffprobe output", id)
-        _duration_cache[id] = None
+    except json.JSONDecodeError:
+        logger.warning("probe_media_info(%s): ffprobe returned invalid JSON", id)
+        _media_info_cache[id] = None
         return None
-    logger.info("probe_duration_seconds(%s): %.1fs (probed in %.1fs)", id, duration, time.monotonic() - started)
-    _duration_cache[id] = duration
-    return duration
+
+    duration = None
+    try:
+        duration = float(data["format"]["duration"])
+    except (KeyError, ValueError, TypeError):
+        logger.debug("probe_media_info(%s): no usable duration in ffprobe output", id)
+
+    audio_tracks = []
+    for i, s in enumerate(s for s in data.get("streams", []) if s.get("codec_type") == "audio"):
+        tags = s.get("tags") or {}
+        audio_tracks.append({
+            "index": i,
+            "language": tags.get("language") or "und",
+            "title": tags.get("title") or "",
+            "codec": (s.get("codec_name") or "").lower(),
+            "default": bool(s.get("disposition", {}).get("default")),
+        })
+
+    info = {"duration": duration, "audio_tracks": audio_tracks}
+    logger.info(
+        "probe_media_info(%s): duration=%s, %d audio track(s) (probed in %.1fs)",
+        id, duration, len(audio_tracks), time.monotonic() - started,
+    )
+    _media_info_cache[id] = info
+    return info
 
 
-async def get_audio_fix_plan(id, secure_hash, force=None):
+async def get_audio_fix_plan(id, secure_hash, force=None, audio_track_index=None):
     """Returns {"needs_fix": bool, "audio_track_index": int|None}. audio_track_index is the
-    ffmpeg per-type stream index (what `-map 0:a:N` expects) of the track that would be selected
-    by default (the one flagged default, else the first audio track).
+    ffmpeg per-type stream index (what `-map 0:a:N` expects) of the track to use.
 
-    `force` lets a caller skip auto-detection entirely for an explicit comparison link:
-    - force=False: always NO_FIX_PLAN (plain passthrough), no probing at all.
-    - force=True: always FORCED_FIX_PLAN (transcode track 0), no probing at all — deterministic
-      even if probing itself is what's broken, which is the point of a debug/comparison link.
-    - force=None (default): auto-detect via ffprobe, cached per file id.
+    - audio_track_index given (an explicit pick from the language/track UI): always
+      {"needs_fix": True, "audio_track_index": audio_track_index}, regardless of `force` or
+      what that track's own codec is — once a viewer has explicitly picked a track, playback for
+      that file stays on this one consistent, seek-capable pipeline rather than silently switching
+      pipelines depending on whether the picked track happens to need fixing.
+    - otherwise, `force` lets a caller skip auto-detection entirely for an explicit comparison
+      link: force=False -> always NO_FIX_PLAN, no probing; force=True -> always FORCED_FIX_PLAN
+      (track 0), no probing — deterministic even if probing itself is what's broken, which is the
+      point of a debug/comparison link; force=None (default) -> auto-detect via probe_media_info,
+      cached per file id.
 
     Auto-detect fails open: any problem probing (ffprobe missing, times out, bad output, no
     audio streams) results in needs_fix=False so a probing hiccup never blocks ordinary playback.
     """
+    if audio_track_index is not None:
+        logger.info("get_audio_fix_plan(%s): explicit track %s picked, using the fixed pipeline", id, audio_track_index)
+        return {"needs_fix": True, "audio_track_index": audio_track_index}
     if force is False:
         logger.debug("get_audio_fix_plan(%s): force=False, plain passthrough", id)
         return NO_FIX_PLAN
@@ -215,66 +248,23 @@ async def get_audio_fix_plan(id, secure_hash, force=None):
         logger.debug("get_audio_fix_plan(%s): ENABLE_AUDIO_FIX is off", id)
         _probe_cache[id] = NO_FIX_PLAN
         return NO_FIX_PLAN
-    if not tools_available():
-        logger.warning("get_audio_fix_plan(%s): ffmpeg/ffprobe not found on PATH, staying on plain passthrough", id)
+
+    info = await probe_media_info(id, secure_hash)
+    if info is None or not info["audio_tracks"]:
+        logger.debug("get_audio_fix_plan(%s): no usable probe / no audio streams", id)
         _probe_cache[id] = NO_FIX_PLAN
         return NO_FIX_PLAN
 
-    url = self_url(id, secure_hash)
-    cmd = [
-        "ffprobe", "-v", "error", "-print_format", "json", "-show_streams",
-        "-headers", INTERNAL_HEADER_LINE, url,
-    ]
-    started = time.monotonic()
-    try:
-        proc = await asyncio.create_subprocess_exec(
-            *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
-        )
-        out, err = await asyncio.wait_for(proc.communicate(), timeout=PROBE_TIMEOUT_SECONDS)
-    except Exception:
-        logger.warning(
-            "get_audio_fix_plan(%s): ffprobe failed to run after %.1fs", id, time.monotonic() - started, exc_info=True
-        )
-        _probe_cache[id] = NO_FIX_PLAN
-        return NO_FIX_PLAN
-    logger.debug("get_audio_fix_plan(%s): ffprobe finished in %.1fs", id, time.monotonic() - started)
-
-    if proc.returncode != 0:
-        logger.warning("get_audio_fix_plan(%s): ffprobe exited %s: %s", id, proc.returncode, (err or b"")[-2000:])
-        _probe_cache[id] = NO_FIX_PLAN
-        return NO_FIX_PLAN
-
-    try:
-        data = json.loads(out or b"{}")
-    except json.JSONDecodeError:
-        logger.warning("get_audio_fix_plan(%s): ffprobe returned invalid JSON", id)
-        _probe_cache[id] = NO_FIX_PLAN
-        return NO_FIX_PLAN
-
-    audio_streams = [s for s in data.get("streams", []) if s.get("codec_type") == "audio"]
-    logger.debug(
-        "get_audio_fix_plan(%s): %d audio stream(s): %s", id, len(audio_streams),
-        [(s.get("codec_name"), s.get("disposition", {}).get("default")) for s in audio_streams],
-    )
-    if not audio_streams:
-        logger.debug("get_audio_fix_plan(%s): no audio streams", id)
-        _probe_cache[id] = NO_FIX_PLAN
-        return NO_FIX_PLAN
-
-    chosen_pos, chosen = next(
-        ((i, s) for i, s in enumerate(audio_streams) if s.get("disposition", {}).get("default")),
-        (0, audio_streams[0]),
-    )
-    codec_name = (chosen.get("codec_name") or "").lower()
-    if codec_name in UNSUPPORTED_AUDIO_CODECS:
-        plan = {"needs_fix": True, "audio_track_index": chosen_pos}
+    chosen = next((t for t in info["audio_tracks"] if t["default"]), info["audio_tracks"][0])
+    if chosen["codec"] in UNSUPPORTED_AUDIO_CODECS:
+        plan = {"needs_fix": True, "audio_track_index": chosen["index"]}
         logger.info(
             "get_audio_fix_plan(%s): audio codec %r unsupported in-browser, will transcode track %s to AAC",
-            id, codec_name, chosen_pos,
+            id, chosen["codec"], chosen["index"],
         )
     else:
         plan = NO_FIX_PLAN
-        logger.debug("get_audio_fix_plan(%s): audio codec %r is fine as-is", id, codec_name)
+        logger.debug("get_audio_fix_plan(%s): audio codec %r is fine as-is", id, chosen["codec"])
     _probe_cache[id] = plan
     return plan
 
@@ -288,6 +278,13 @@ async def start_ffmpeg_transcode(id, secure_hash, audio_track_index, start_secon
     within — it lands on the nearest preceding keyframe, which is normal/expected for stream-copy
     seeking). This is how seeking works with no disk cache: a seek just starts a fresh transcode
     from the new point rather than resuming an existing one.
+
+    Mixing a copied stream (snaps to the nearest keyframe, no timestamp correction possible
+    without decoding) with a re-encoded one (gets frame-accurate timestamps) at a non-zero seek
+    point is a well-known ffmpeg source of audio/video drift that gets worse the longer playback
+    continues. `-af aresample=async=1` lets the audio resampler stretch/compress slightly to stay
+    aligned with the video's actual timestamps, and `-avoid_negative_ts make_zero` keeps a seek
+    from handing either stream a negative/offset starting timestamp relative to the other.
     """
     url = self_url(id, secure_hash)
     cmd = ["ffmpeg", "-v", "error"]
@@ -298,6 +295,8 @@ async def start_ffmpeg_transcode(id, secure_hash, audio_track_index, start_secon
         "-map", "0:v:0", "-map", f"0:a:{audio_track_index}",
         "-c:v", "copy",
         "-c:a", "aac", "-b:a", "192k", "-ac", "2",
+        "-af", "aresample=async=1",
+        "-avoid_negative_ts", "make_zero",
         "-movflags", "frag_keyframe+empty_moov+default_base_moof",
         "-f", "mp4", "pipe:1",
     ]
