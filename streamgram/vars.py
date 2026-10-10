@@ -83,6 +83,14 @@ class Var(object):
     else:
         logger.info("Access group configured: USER_GROUP_ID=%s", USER_GROUP_ID)
 
+    # Audio-fix transcoding (see streamgram/utils/audio_fix.py): browsers can't decode AC3/E-AC3/DTS/
+    # TrueHD audio natively, so a file with one of those tracks plays video with no sound. When
+    # enabled, such files are served through a narrow ffmpeg pass that copies video untouched and
+    # re-encodes only the audio to AAC. Needs the ffmpeg/ffprobe binaries on PATH; silently stays
+    # off (falls back to today's plain passthrough) if they're missing.
+    ENABLE_AUDIO_FIX = _env_bool('ENABLE_AUDIO_FIX', True)
+    MAX_CONCURRENT_AUDIO_FIX = int(getenv('MAX_CONCURRENT_AUDIO_FIX', 2))
+
     # logging (see streamgram/utils/logging_config.py)
     LOG_LEVEL = str(getenv('LOG_LEVEL', 'INFO'))            # DEBUG, INFO, WARNING, ERROR
     LOG_LIBS_LEVEL = str(getenv('LOG_LIBS_LEVEL', 'WARNING'))  # pyrogram, uvicorn, motor ...

@@ -21,6 +21,7 @@ from streamgram.vars import Var
 from streamgram.utils.access import access_db
 from streamgram.utils.link_expiry import link_expiry
 from streamgram.utils.link_security import link_tokens
+from streamgram.utils import audio_fix
 from datetime import datetime
 
 router = APIRouter()
@@ -164,6 +165,41 @@ async def media_streamer(request: Request, id: int, secure_hash: str):
         raise InvalidHash
     if await link_expiry.is_expired(id):
         raise LinkExpired
+
+    # The audio-fix pass (streamgram/utils/audio_fix.py) reads this same endpoint via ffprobe/ffmpeg
+    # over loopback to do its work; that self-call carries this header so it never recurses into
+    # itself. A real browser/viewer request never sends it.
+    is_internal_call = request.headers.get(audio_fix.INTERNAL_HEADER_NAME) == "1"
+    if (
+        not is_internal_call
+        and Var.ENABLE_AUDIO_FIX
+        and (file_id.mime_type or "").split("/")[0] == "video"
+    ):
+        plan = await audio_fix.get_audio_fix_plan(id, secure_hash)
+        if plan["needs_fix"]:
+            try:
+                await audio_fix.begin_transcode()
+            except audio_fix.TranscodeBusy:
+                logger.warning(
+                    "media_streamer(%s): audio-fix transcode slots full, falling back to plain "
+                    "passthrough (video only, no audio)", id,
+                )
+            else:
+                try:
+                    proc = await audio_fix.start_ffmpeg_transcode(id, secure_hash, plan["audio_track_index"])
+                except Exception:
+                    logger.exception("media_streamer(%s): failed to start ffmpeg, falling back to passthrough", id)
+                    await audio_fix.end_transcode()
+                else:
+                    logger.info("media_streamer(%s): streaming with audio fixed (unsupported codec -> AAC)", id)
+                    body = audio_fix.stream_ffmpeg_output(proc, request, id)
+                    out_name = sanitize_header_value((file_id.file_name or "video").rsplit(".", 1)[0] + ".mp4")
+                    headers = {
+                        "Content-Type": "video/mp4",
+                        "Content-Disposition": f'inline; filename="{out_name}"',
+                        "Accept-Ranges": "none",
+                    }
+                    return StreamingResponse(body, status_code=200, headers=headers, media_type="video/mp4")
 
     file_size = file_id.file_size or 0
     byte_range = parse_range(range_header, file_size)

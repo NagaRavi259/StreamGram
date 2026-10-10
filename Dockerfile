@@ -2,9 +2,10 @@ FROM python:3.11-slim
 
 WORKDIR /app
 
-# System packages used by TgCrypto's build and by psutil at runtime.
+# gcc: TgCrypto's build and psutil at runtime. ffmpeg: streamgram/utils/audio_fix.py's AC3/E-AC3/
+# DTS/TrueHD -> AAC audio fix (optional at runtime, controlled by ENABLE_AUDIO_FIX).
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends gcc \
+    && apt-get install -y --no-install-recommends gcc ffmpeg \
     && rm -rf /var/lib/apt/lists/*
 
 COPY requirements.txt .
