@@ -57,7 +57,7 @@ async def main():
     from streamgram.utils.access import access_db as _access_db
     install_fakes(_access_db)
     from streamgram.server import stream_routes as sr
-    from streamgram.utils import audio_fix
+    from streamgram.utils import audio_fix, render_template
     from streamgram.utils.custom_dl import ByteStreamer
     from streamgram.bot import work_loads, multi_clients
     from streamgram.vars import Var
@@ -192,14 +192,15 @@ async def main():
         return
 
     # ---------- end-to-end: real ffmpeg fixture, real server, real ffprobe/ffmpeg round trip
+    FIXTURE_DURATION = 6  # seconds; long enough, with 1s keyframes, to make seeking meaningful
     tmp_dir = tempfile.mkdtemp(prefix="ftl-audiofix-")
     fixture_path = os.path.join(tmp_dir, "fixture.mkv")
     subprocess.run(
         [
             "ffmpeg", "-y", "-v", "error",
-            "-f", "lavfi", "-i", "testsrc2=size=320x240:rate=10:duration=2",
-            "-f", "lavfi", "-i", "sine=frequency=440:duration=2",
-            "-c:v", "libx264", "-pix_fmt", "yuv420p",
+            "-f", "lavfi", "-i", f"testsrc2=size=320x240:rate=10:duration={FIXTURE_DURATION}",
+            "-f", "lavfi", "-i", f"sine=frequency=440:duration={FIXTURE_DURATION}",
+            "-c:v", "libx264", "-pix_fmt", "yuv420p", "-g", "10", "-keyint_min", "10",
             "-c:a", "eac3", "-b:a", "192k",
             "-f", "matroska", fixture_path,
         ],
@@ -314,6 +315,53 @@ async def main():
         assert r5.headers.get("content-type") == "video/mp4", r5.headers
         assert len(r5.content) > 1000
         print("E7 ok: ?audiofix=1 forces the fixed stream, for comparison")
+
+        # ---------- duration probing (what makes the seek-capable player's bar correct)
+        duration = await audio_fix.probe_duration_seconds(msg_id, secure_hash)
+        assert duration is not None and abs(duration - FIXTURE_DURATION) < 0.5, duration
+        print(f"E8 ok: probe_duration_seconds reports ~{duration:.1f}s for a {FIXTURE_DURATION}s fixture")
+
+        # ---------- ?start=N actually seeks: output should cover roughly [N, duration], not the
+        # whole file again (the actual feature being added here, no disk cache: a seek just
+        # starts a fresh transcode from the requested point)
+        seek_to = 3
+        r6 = requests.get(f"{base}/{msg_id}?hash={secure_hash}&audiofix=1&start={seek_to}", timeout=30)
+        assert r6.status_code == 200 and r6.headers.get("content-type") == "video/mp4"
+        seek_out_path = os.path.join(tmp_dir, "seek_out.mp4")
+        with open(seek_out_path, "wb") as f:
+            f.write(r6.content)
+        seek_probe = subprocess.run(
+            ["ffprobe", "-v", "error", "-print_format", "json", "-show_format", seek_out_path],
+            capture_output=True, check=True,
+        )
+        seek_duration = float(json.loads(seek_probe.stdout)["format"]["duration"])
+        expected_remaining = FIXTURE_DURATION - seek_to
+        assert abs(seek_duration - expected_remaining) < 1.5, (seek_duration, expected_remaining)
+        decode2 = subprocess.run(["ffmpeg", "-v", "error", "-i", seek_out_path, "-f", "null", "-"], capture_output=True)
+        assert decode2.returncode == 0 and decode2.stderr == b"", decode2.stderr
+        print(f"E9 ok: ?start={seek_to} yields ~{seek_duration:.1f}s of output (expected ~{expected_remaining}s), decodes cleanly")
+
+        # ---------- the watch page uses the seek-capable custom player when the fix applies,
+        # and the plain Plyr-based page when it's forced off
+        async def get_file_ids(client, chat, mid):
+            return file_id
+        render_template.get_file_ids = get_file_ids
+
+        watch_fixed = requests.get(f"{base}/watch/{msg_id}/?hash={secure_hash}&audiofix=1", timeout=30)
+        assert watch_fixed.status_code == 200
+        body = watch_fixed.text
+        assert "audio-fix player" not in body  # sanity: not literally searching for our own comment
+        assert "var totalDuration" in body and "var baseStreamUrl" in body
+        assert f"start=' + encodeURIComponent" in body  # the seek-reload logic is present
+        assert f"&amp;audiofix=1" not in body  # the embedded stream URL must be the raw (unescaped) one
+        assert "&audiofix=1" in body
+        print("E10 ok: watch page renders the seek-capable custom player when the fix applies")
+
+        watch_plain = requests.get(f"{base}/watch/{msg_id}/?hash={secure_hash}&audiofix=0", timeout=30)
+        assert watch_plain.status_code == 200
+        assert "var totalDuration" not in watch_plain.text
+        assert "plyr" in watch_plain.text.lower()
+        print("E11 ok: watch page falls back to the plain player when ?audiofix=0 forces the fix off")
     finally:
         server.should_exit = True
         thread.join(timeout=10)

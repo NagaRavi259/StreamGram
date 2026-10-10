@@ -33,8 +33,24 @@ INTERNAL_HEADER_LINE = "X-Internal-Call: 1\r\n"
 
 PROBE_TIMEOUT_SECONDS = 60  # a multi-GB file's Cues/index can be slow to reach over Telegram
 READ_CHUNK_SIZE = 256 * 1024
-_DISCONNECT_POLL_SECONDS = 2.0
+# Kept short so that when a seek abandons one transcode and starts another (no disk cache: every
+# seek re-transcodes from the new point), the old one's slot frees up quickly rather than making
+# a second fast seek spuriously hit the concurrency cap.
+_DISCONNECT_POLL_SECONDS = 0.5
 STALL_TIMEOUT_SECONDS = 45  # no new bytes from ffmpeg for this long -> give up and log loudly
+
+
+def parse_audiofix_override(raw):
+    """Parses the `audiofix` query param into True (force on) / False (force off) / None (auto-
+    detect). Shared by stream_routes.py (what to actually serve) and render_template.py (whether
+    the watch page needs the seek-capable custom player instead of the plain one) so both agree
+    on the same three-way logic."""
+    value = (raw or "").strip().lower()
+    if value in ("1", "true", "on"):
+        return True
+    if value in ("0", "false", "off"):
+        return False
+    return None
 
 
 def _which(name):
@@ -117,9 +133,58 @@ NO_FIX_PLAN = {"needs_fix": False, "audio_track_index": None}
 FORCED_FIX_PLAN = {"needs_fix": True, "audio_track_index": 0}
 
 
+_duration_cache = {}
+
+
 def clear_probe_cache():
     """Test-only hook; production never needs to evict a cached plan."""
     _probe_cache.clear()
+    _duration_cache.clear()
+
+
+async def probe_duration_seconds(id, secure_hash):
+    """Returns the file's total duration in seconds (float), or None if it can't be determined
+    (ffprobe missing/failed, or no duration in the container). Cached per file id.
+
+    Used only to render the seek-capable custom player (see streamgram/template/audiofix_player.html):
+    since a re-transcoded-per-seek stream can't report its own total duration (each request only
+    covers [seek point, end of file]), the watch page is told the real duration once upfront and
+    builds its own seek bar/position display from that instead of trusting the <video> element's.
+    """
+    if id in _duration_cache:
+        return _duration_cache[id]
+    if not tools_available():
+        _duration_cache[id] = None
+        return None
+    url = self_url(id, secure_hash)
+    cmd = ["ffprobe", "-v", "error", "-print_format", "json", "-show_format", "-headers", INTERNAL_HEADER_LINE, url]
+    started = time.monotonic()
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
+        )
+        out, err = await asyncio.wait_for(proc.communicate(), timeout=PROBE_TIMEOUT_SECONDS)
+    except Exception:
+        logger.warning(
+            "probe_duration_seconds(%s): ffprobe failed to run after %.1fs", id, time.monotonic() - started,
+            exc_info=True,
+        )
+        _duration_cache[id] = None
+        return None
+    if proc.returncode != 0:
+        logger.warning("probe_duration_seconds(%s): ffprobe exited %s: %s", id, proc.returncode, (err or b"")[-2000:])
+        _duration_cache[id] = None
+        return None
+    try:
+        data = json.loads(out or b"{}")
+        duration = float(data["format"]["duration"])
+    except (KeyError, ValueError, TypeError, json.JSONDecodeError):
+        logger.warning("probe_duration_seconds(%s): no usable duration in ffprobe output", id)
+        _duration_cache[id] = None
+        return None
+    logger.info("probe_duration_seconds(%s): %.1fs (probed in %.1fs)", id, duration, time.monotonic() - started)
+    _duration_cache[id] = duration
+    return duration
 
 
 async def get_audio_fix_plan(id, secure_hash, force=None):
@@ -214,12 +279,21 @@ async def get_audio_fix_plan(id, secure_hash, force=None):
     return plan
 
 
-async def start_ffmpeg_transcode(id, secure_hash, audio_track_index):
+async def start_ffmpeg_transcode(id, secure_hash, audio_track_index, start_seconds=0.0):
     """Spawns ffmpeg: video stream-copied untouched, chosen audio track re-encoded to stereo AAC,
-    muxed into a streamable fragmented MP4 written to stdout. Raises if the process can't start."""
+    muxed into a streamable fragmented MP4 written to stdout. Raises if the process can't start.
+
+    start_seconds seeks the *input* before decoding anything (`-ss` before `-i`: fast, and the
+    only option that makes sense with `-c:v copy` anyway, since there's no re-encode to seek
+    within — it lands on the nearest preceding keyframe, which is normal/expected for stream-copy
+    seeking). This is how seeking works with no disk cache: a seek just starts a fresh transcode
+    from the new point rather than resuming an existing one.
+    """
     url = self_url(id, secure_hash)
-    cmd = [
-        "ffmpeg", "-v", "error",
+    cmd = ["ffmpeg", "-v", "error"]
+    if start_seconds and start_seconds > 0:
+        cmd += ["-ss", str(start_seconds)]
+    cmd += [
         "-headers", INTERNAL_HEADER_LINE, "-i", url,
         "-map", "0:v:0", "-map", f"0:a:{audio_track_index}",
         "-c:v", "copy",

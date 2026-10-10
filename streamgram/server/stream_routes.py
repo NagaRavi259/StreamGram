@@ -102,7 +102,7 @@ async def watch_handler(request: Request, path: str):
         id, secure_hash = parse_path(request, path)
         if not secure_hash:
             raise InvalidHash
-        return HTMLResponse(content=await render_page(id, secure_hash))
+        return HTMLResponse(content=await render_page(id, secure_hash, request.query_params.get("audiofix")))
     except HTTPException:
         raise
     except InvalidHash as e:
@@ -173,12 +173,14 @@ async def media_streamer(request: Request, id: int, secure_hash: str):
     # ?audiofix=1/true/on forces the transcode path on, ?audiofix=0/false/off forces it off,
     # regardless of auto-detection — the two comparison links the bot sends use these explicitly
     # so a viewer (or we, debugging) can tell "the original" and "the fixed" apart deterministically.
-    audiofix_param = (request.query_params.get("audiofix") or "").strip().lower()
-    force_audio_fix = (
-        True if audiofix_param in ("1", "true", "on")
-        else False if audiofix_param in ("0", "false", "off")
-        else None
-    )
+    force_audio_fix = audio_fix.parse_audiofix_override(request.query_params.get("audiofix"))
+    # ?start=<seconds>: seeking with no disk cache means a seek just restarts the transcode from
+    # the new point (streamgram/template/audiofix_player.html drives this); meaningless outside the
+    # fix path, since plain passthrough already seeks natively via real byte ranges.
+    try:
+        start_seconds = max(0.0, float(request.query_params.get("start") or 0))
+    except ValueError:
+        start_seconds = 0.0
     is_video_kind = (file_id.mime_type or "").split("/")[0] == "video"
     if not is_internal_call and is_video_kind and (force_audio_fix is not None or Var.ENABLE_AUDIO_FIX):
         plan = await audio_fix.get_audio_fix_plan(id, secure_hash, force=force_audio_fix)
@@ -192,7 +194,9 @@ async def media_streamer(request: Request, id: int, secure_hash: str):
                 )
             else:
                 try:
-                    proc = await audio_fix.start_ffmpeg_transcode(id, secure_hash, plan["audio_track_index"])
+                    proc = await audio_fix.start_ffmpeg_transcode(
+                        id, secure_hash, plan["audio_track_index"], start_seconds=start_seconds
+                    )
                 except Exception:
                     logger.exception("media_streamer(%s): failed to start ffmpeg, falling back to passthrough", id)
                     audio_fix.end_transcode()

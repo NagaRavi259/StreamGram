@@ -5,15 +5,17 @@ from streamgram.utils.file_properties import get_file_ids
 from streamgram.utils.access import access_db
 from streamgram.utils.link_expiry import link_expiry
 from streamgram.utils.link_security import link_tokens
+from streamgram.utils import audio_fix
 from streamgram.server.exceptions import InvalidHash, FIleNotFound, LinkExpired
 import html
+import json
 import urllib.parse
 import aiofiles
 import logging
 logger = logging.getLogger("streamgram.utils.render_template")
 
 
-async def render_page(id, secure_hash):
+async def render_page(id, secure_hash, audiofix_param=None):
     logger.debug("render_page(%s)", id)
     if await access_db.is_revoked(id):
         logger.info("render_page(%s): link is revoked", id)
@@ -25,15 +27,42 @@ async def render_page(id, secure_hash):
     if await link_expiry.is_expired(id):
         logger.info("render_page(%s): link has expired", id)
         raise LinkExpired
-    src = html.escape(urllib.parse.urljoin(Var.URL, f'{int(id)}/?hash={urllib.parse.quote(secure_hash)}'), quote=True)
+    raw_src = urllib.parse.urljoin(Var.URL, f'{int(id)}/?hash={urllib.parse.quote(secure_hash)}')
+    src = html.escape(raw_src, quote=True)
     # File names are chosen by whoever uploaded the file: always escape before putting them in HTML.
     name = html.escape(file_data.file_name or "file")
     kind = (file_data.mime_type or "").split('/')[0].strip()
     if kind in ('video', 'audio'):
         heading = '{} {}'.format('Watch' if kind == 'video' else 'Listen', name)
         logger.debug("render_page(%s): media page (%s)", id, kind)
-        async with aiofiles.open('streamgram/template/req.html') as r:
-            page = (await r.read()).replace('__MEDIA__', kind) % (heading, name, src)
+
+        needs_seek_player = False
+        duration_seconds = None
+        if kind == "video":
+            force = audio_fix.parse_audiofix_override(audiofix_param)
+            if force is not None or Var.ENABLE_AUDIO_FIX:
+                plan = await audio_fix.get_audio_fix_plan(id, secure_hash, force=force)
+                if plan["needs_fix"]:
+                    duration_seconds = await audio_fix.probe_duration_seconds(id, secure_hash)
+                    needs_seek_player = duration_seconds is not None
+
+        if needs_seek_player:
+            # The stream itself can't report its own total duration or support real byte-range
+            # seeking (it's re-transcoded per request, no disk cache — see audio_fix.py), so this
+            # page gets its own player that tracks duration/position itself and seeks by
+            # reloading the stream at a new `start=` point (streamgram/template/audiofix_player.html).
+            logger.debug("render_page(%s): using the seek-capable audio-fix player", id)
+            # &audiofix=1 pinned explicitly so every reload this page does (every seek) stays on
+            # the fixed path, regardless of what triggered it here (an explicit override or
+            # auto-detection, which is itself re-checked, and cached, on each such reload anyway).
+            stream_url_for_js = f"{raw_src}&audiofix=1"
+            async with aiofiles.open('streamgram/template/audiofix_player.html', encoding='utf-8') as r:
+                page = (await r.read()) % (
+                    heading, heading, json.dumps(duration_seconds), json.dumps(stream_url_for_js)
+                )
+        else:
+            async with aiofiles.open('streamgram/template/req.html', encoding='utf-8') as r:
+                page = (await r.read()).replace('__MEDIA__', kind) % (heading, name, src)
     else:
         heading = 'Download {}'.format(name)
         logger.debug("render_page(%s): download page", id)
