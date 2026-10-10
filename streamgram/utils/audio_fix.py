@@ -193,6 +193,12 @@ async def probe_media_info(id, secure_hash):
     except (KeyError, ValueError, TypeError):
         logger.debug("probe_media_info(%s): no usable duration in ffprobe output", id)
 
+    video_width = video_height = None
+    for s in data.get("streams", []):
+        if s.get("codec_type") == "video":
+            video_width, video_height = s.get("width"), s.get("height")
+            break
+
     audio_tracks = []
     for i, s in enumerate(s for s in data.get("streams", []) if s.get("codec_type") == "audio"):
         tags = s.get("tags") or {}
@@ -204,7 +210,10 @@ async def probe_media_info(id, secure_hash):
             "default": bool(s.get("disposition", {}).get("default")),
         })
 
-    info = {"duration": duration, "audio_tracks": audio_tracks}
+    info = {
+        "duration": duration, "audio_tracks": audio_tracks,
+        "video_width": video_width, "video_height": video_height,
+    }
     logger.info(
         "probe_media_info(%s): duration=%s, %d audio track(s) (probed in %.1fs)",
         id, duration, len(audio_tracks), time.monotonic() - started,
@@ -279,12 +288,18 @@ async def start_ffmpeg_transcode(id, secure_hash, audio_track_index, start_secon
     seeking). This is how seeking works with no disk cache: a seek just starts a fresh transcode
     from the new point rather than resuming an existing one.
 
-    Mixing a copied stream (snaps to the nearest keyframe, no timestamp correction possible
-    without decoding) with a re-encoded one (gets frame-accurate timestamps) at a non-zero seek
-    point is a well-known ffmpeg source of audio/video drift that gets worse the longer playback
-    continues. `-af aresample=async=1` lets the audio resampler stretch/compress slightly to stay
-    aligned with the video's actual timestamps, and `-avoid_negative_ts make_zero` keeps a seek
-    from handing either stream a negative/offset starting timestamp relative to the other.
+    Mixing a copied stream (keeps whatever timestamps the source has, exactly, since it's never
+    decoded) with a re-encoded one (gets brand-new, perfectly regular timestamps from the AAC
+    encoder) is a well-known ffmpeg source of audio/video drift — and if the source itself has
+    any timing irregularity (common in real-world rips, far more than in a clean synthetic test
+    file), that drift compounds continuously through playback, not just once at a seek point.
+    `aresample=async=1:min_hard_comp=0.100000:first_pts=0` (the full form of the fix, not just
+    the bare filter) lets the audio resampler continuously stretch/compress to stay locked to
+    actual video timing rather than drifting. `-avoid_negative_ts make_zero` keeps a seek from
+    handing either stream a negative/offset starting timestamp relative to the other.
+    `-frag_duration` bounds how long a fragment can run even without a video keyframe, so audio
+    and video stay closely interleaved in the output instead of one trailing the other by however
+    long the source's keyframe interval happens to be.
     """
     url = self_url(id, secure_hash)
     cmd = ["ffmpeg", "-v", "error"]
@@ -295,9 +310,10 @@ async def start_ffmpeg_transcode(id, secure_hash, audio_track_index, start_secon
         "-map", "0:v:0", "-map", f"0:a:{audio_track_index}",
         "-c:v", "copy",
         "-c:a", "aac", "-b:a", "192k", "-ac", "2",
-        "-af", "aresample=async=1",
+        "-af", "aresample=async=1:min_hard_comp=0.100000:first_pts=0",
         "-avoid_negative_ts", "make_zero",
         "-movflags", "frag_keyframe+empty_moov+default_base_moof",
+        "-frag_duration", "2000000",
         "-f", "mp4", "pipe:1",
     ]
     logger.info("start_ffmpeg_transcode(%s): %s", id, " ".join(cmd))

@@ -56,9 +56,16 @@ async def render_page(id, secure_hash, audiofix_param=None):
             # &audiofix=1 pinned explicitly so every reload this page does (every seek, every
             # track switch) stays on the fixed path, regardless of what triggered it here.
             stream_url_for_js = f"{raw_src}&audiofix=1"
+            width, height = media_info["video_width"], media_info["video_height"]
+            # A fixed aspect-ratio box so the player never visibly resizes on a seek/track-switch
+            # reload (a plain <video> collapses to its default/no size until the new segment's
+            # metadata loads) — known dimensions from the probe, 16/9 if that's unavailable.
+            aspect_ratio = f"{width} / {height}" if width and height else "16 / 9"
+            # Tuple order must match the placeholders' left-to-right order in the template file,
+            # not an arbitrary order: Python's %-formatting is purely positional against the text.
             async with aiofiles.open('streamgram/template/audiofix_player.html', encoding='utf-8') as r:
                 page = (await r.read()) % (
-                    heading, heading,
+                    heading, heading, aspect_ratio,
                     json.dumps(media_info["duration"]),
                     json.dumps(stream_url_for_js),
                     json.dumps(media_info["audio_tracks"]),

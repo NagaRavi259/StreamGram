@@ -331,6 +331,7 @@ async def main():
         assert [t["language"] for t in tracks] == ["eng", "tel"], tracks
         assert tracks[0]["default"] is True and tracks[1]["default"] is False, tracks
         assert all(t["codec"] == "eac3" for t in tracks), tracks
+        assert media_info["video_width"] == 320 and media_info["video_height"] == 240, media_info
         print(f"E8 ok: probe_media_info reports ~{duration:.1f}s duration and both audio tracks correctly")
 
         # ---------- ?start=N actually seeks: output should cover roughly [N, duration], not the
@@ -411,6 +412,7 @@ async def main():
         assert "var audioTracks" in body and "var currentTrackIndex" in body
         assert '"language": "eng"' in body and '"language": "tel"' in body
         assert "var currentTrackIndex = 0;" in body  # eng is the disposition-default track
+        assert 'style="aspect-ratio: 320 / 240;"' in body  # real probed resolution, not a guess
         print("E10 ok: watch page renders the seek-capable custom player with both audio tracks")
 
         watch_plain = requests.get(f"{base}/watch/{msg_id}/?hash={secure_hash}&audiofix=0", timeout=30)
