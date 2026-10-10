@@ -162,7 +162,7 @@ async def probe_media_info(id, secure_hash):
     url = self_url(id, secure_hash)
     cmd = [
         "ffprobe", "-v", "error", "-print_format", "json", "-show_format", "-show_streams",
-        "-headers", INTERNAL_HEADER_LINE, url,
+        "-seekable", "1", "-headers", INTERNAL_HEADER_LINE, url,
     ]
     started = time.monotonic()
     try:
@@ -288,24 +288,34 @@ async def start_ffmpeg_transcode(id, secure_hash, audio_track_index, start_secon
     seeking). This is how seeking works with no disk cache: a seek just starts a fresh transcode
     from the new point rather than resuming an existing one.
 
-    Mixing a copied stream (keeps whatever timestamps the source has, exactly, since it's never
-    decoded) with a re-encoded one (gets brand-new, perfectly regular timestamps from the AAC
-    encoder) is a well-known ffmpeg source of audio/video drift — and if the source itself has
-    any timing irregularity (common in real-world rips, far more than in a clean synthetic test
-    file), that drift compounds continuously through playback, not just once at a seek point.
-    `aresample=async=1:min_hard_comp=0.100000:first_pts=0` (the full form of the fix, not just
-    the bare filter) lets the audio resampler continuously stretch/compress to stay locked to
-    actual video timing rather than drifting. `-avoid_negative_ts make_zero` keeps a seek from
-    handing either stream a negative/offset starting timestamp relative to the other.
-    `-frag_duration` bounds how long a fragment can run even without a video keyframe, so audio
-    and video stay closely interleaved in the output instead of one trailing the other by however
-    long the source's keyframe interval happens to be.
+    The actual audio-lags-after-seeking bug: a stream-copied track (never decoded) always snaps
+    to the nearest keyframe at/before the seek point, but ffmpeg's default "accurate seek" trims
+    any *decoded* track (our re-encoded audio) to land exactly on the requested second instead.
+    So video starts at the keyframe and audio starts later, at the literal requested time — a gap
+    of up to one full keyframe interval, which is only ~1s in this module's own tiny test fixture
+    but can be several seconds on a real file with normal (sparser) keyframe spacing. That gap
+    *is* the lag; it isn't drift and no resampling filter touches it. `-noaccurate_seek` turns off
+    that trim so audio, like video, just starts wherever the demuxer's seek actually landed —
+    both tracks come from the same point in the source again.
+
+    `-avoid_negative_ts make_zero` additionally keeps a seek from handing either stream a
+    negative/offset starting timestamp relative to the other, and `aresample=async=1` lets the
+    audio resampler correct for any ongoing drift from source timing irregularities afterwards —
+    both worth keeping, but neither is the fix for the gap above.
     """
     url = self_url(id, secure_hash)
     cmd = ["ffmpeg", "-v", "error"]
     if start_seconds and start_seconds > 0:
-        cmd += ["-ss", str(start_seconds)]
+        cmd += ["-ss", str(start_seconds), "-noaccurate_seek"]
     cmd += [
+        # Without this, ffmpeg's http protocol handler doesn't trust that our server supports
+        # real byte-range seeking and falls back to a broken probe-but-don't-really-seek strategy
+        # for fragmented output specifically — it issues a few small Range reads near the start
+        # and end of the file, then gives up and streams the *entire* file regardless of -ss,
+        # ignoring the seek completely (confirmed directly: our server serves every Range request
+        # byte-correctly, but without this flag ffmpeg never asks for the one near the real seek
+        # target at all). This never showed up against a local file, only over HTTP.
+        "-seekable", "1",
         "-headers", INTERNAL_HEADER_LINE, "-i", url,
         "-map", "0:v:0", "-map", f"0:a:{audio_track_index}",
         "-c:v", "copy",

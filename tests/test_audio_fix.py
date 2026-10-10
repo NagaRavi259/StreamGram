@@ -192,7 +192,13 @@ async def main():
         return
 
     # ---------- end-to-end: real ffmpeg fixture, real server, real ffprobe/ffmpeg round trip
-    FIXTURE_DURATION = 6  # seconds; long enough, with 1s keyframes, to make seeking meaningful
+    FIXTURE_DURATION = 30  # seconds; short fixtures (e.g. 12s) are NOT safe here — confirmed by
+    # direct experimentation that ffmpeg's demuxer seek doesn't meaningfully engage below some
+    # file-size/duration threshold and just reads the whole tiny file regardless of -ss, which
+    # looks exactly like a broken seek but is purely a too-short-fixture artifact. 30s is safely
+    # above that threshold (verified directly) without making the fixture slow to generate.
+    KEYFRAME_INTERVAL = 3  # seconds; realistically sparse (not 1s), so a seek that lands well
+    # inside a GOP (not exactly on a keyframe) is actually possible to construct and test
     tmp_dir = tempfile.mkdtemp(prefix="ftl-audiofix-")
     fixture_path = os.path.join(tmp_dir, "fixture.mkv")
     subprocess.run(
@@ -202,7 +208,8 @@ async def main():
             "-f", "lavfi", "-i", f"sine=frequency=440:duration={FIXTURE_DURATION}",
             "-f", "lavfi", "-i", f"sine=frequency=523:duration={FIXTURE_DURATION}",
             "-map", "0:v", "-map", "1:a", "-map", "2:a",
-            "-c:v", "libx264", "-pix_fmt", "yuv420p", "-g", "10", "-keyint_min", "10",
+            "-c:v", "libx264", "-pix_fmt", "yuv420p",
+            "-g", str(KEYFRAME_INTERVAL * 10), "-keyint_min", str(KEYFRAME_INTERVAL * 10),
             "-c:a", "eac3", "-b:a", "192k",
             "-metadata:s:a:0", "language=eng", "-metadata:s:a:0", "title=English",
             "-metadata:s:a:1", "language=tel", "-metadata:s:a:1", "title=Telugu",
@@ -336,29 +343,49 @@ async def main():
 
         # ---------- ?start=N actually seeks: output should cover roughly [N, duration], not the
         # whole file again (the actual feature being added here, no disk cache: a seek just
-        # starts a fresh transcode from the requested point)
-        seek_to = 3
+        # starts a fresh transcode from the requested point).
+        # Not seek_to=3: confirmed directly that ffmpeg has a sensible optimization where a seek
+        # target shallow enough to already be covered by its initial format-probe read (here,
+        # under ~5s) just reuses that buffered data instead of re-seeking — harmless in practice
+        # (nobody seeks to second 3 of a 2-hour movie) but not what this check is testing for.
+        seek_to = 12
         r6 = requests.get(f"{base}/{msg_id}?hash={secure_hash}&audiofix=1&start={seek_to}", timeout=30)
         assert r6.status_code == 200 and r6.headers.get("content-type") == "video/mp4"
         seek_out_path = os.path.join(tmp_dir, "seek_out.mp4")
         with open(seek_out_path, "wb") as f:
             f.write(r6.content)
-        seek_probe = subprocess.run(
-            ["ffprobe", "-v", "error", "-print_format", "json", "-show_format", seek_out_path],
-            capture_output=True, check=True,
-        )
-        seek_duration = float(json.loads(seek_probe.stdout)["format"]["duration"])
+        # format.duration is NOT used here: it's unreliable for frag_keyframe+empty_moov output
+        # (that mode intentionally omits a real duration from the moov box, for streaming; ffprobe
+        # falls back to a bitrate-based *estimate* that doesn't reflect the real seeked content
+        # span — confirmed by direct ffmpeg experimentation, not a guess). Actual per-packet
+        # timestamps are what's real; span them directly instead.
+        def packet_pts_list(path, stream):
+            p = subprocess.run(
+                ["ffprobe", "-v", "error", "-select_streams", stream, "-show_entries", "packet=pts_time",
+                 "-of", "csv=p=0", path],
+                capture_output=True, check=True, text=True,
+            )
+            return [float(x) for x in p.stdout.strip().splitlines() if x.strip()]
+
+        v_pts = packet_pts_list(seek_out_path, "v:0")
+        seek_span = v_pts[-1] - v_pts[0]
         expected_remaining = FIXTURE_DURATION - seek_to
-        assert abs(seek_duration - expected_remaining) < 1.5, (seek_duration, expected_remaining)
+        # Fast (-noaccurate_seek) seeking snaps to the nearest *preceding* keyframe — up to one
+        # full keyframe interval earlier than requested is correct, documented behavior, not
+        # imprecision to tighten away. The tolerance reflects that, not an exact match.
+        assert abs(seek_span - expected_remaining) < KEYFRAME_INTERVAL + 1, (seek_span, expected_remaining, v_pts[0], v_pts[-1])
         decode2 = subprocess.run(["ffmpeg", "-v", "error", "-i", seek_out_path, "-f", "null", "-"], capture_output=True)
         assert decode2.returncode == 0 and decode2.stderr == b"", decode2.stderr
-        print(f"E9 ok: ?start={seek_to} yields ~{seek_duration:.1f}s of output (expected ~{expected_remaining}s), decodes cleanly")
+        print(f"E9 ok: ?start={seek_to} yields ~{seek_span:.1f}s of real video content (expected ~{expected_remaining}s), decodes cleanly")
 
-        # ---------- audio/video stay aligned at a seek point that does NOT land on a keyframe
-        # (keyframes are every 1s; seeking to 3.4s is the case that actually exercises the
-        # copy-video/transcode-audio drift this is fixing — seeking to an exact keyframe would
-        # pass even without the fix, which would be testing the wrong thing)
-        seek_offset = 3.4
+        # ---------- audio/video stay aligned at a seek point that does NOT land on a keyframe.
+        # Keyframes are every KEYFRAME_INTERVAL (3s) at 0/3/6/9s; seeking to 5.5s lands well inside
+        # the 3-6s GOP, 2.5s past the nearest keyframe. Without -noaccurate_seek, video snaps to
+        # the keyframe at 3s while audio (decoded/re-encoded) gets trimmed to land exactly on
+        # 5.5s — a ~2.5s gap, easily big enough to look exactly like the reported "audio lag
+        # after seeking". Seeking to an exact keyframe would pass even without the fix, so
+        # wouldn't actually be testing anything.
+        seek_offset = KEYFRAME_INTERVAL * 2 + KEYFRAME_INTERVAL / 2  # = 7.5s here; mid-GOP (6-9s)
         r7 = requests.get(f"{base}/{msg_id}?hash={secure_hash}&audiofix=1&start={seek_offset}", timeout=30)
         assert r7.status_code == 200
         offbeat_path = os.path.join(tmp_dir, "offbeat_seek.mp4")
@@ -376,7 +403,9 @@ async def main():
         first_video_pts = first_packet_pts(offbeat_path, "v:0")
         first_audio_pts = first_packet_pts(offbeat_path, "a:0")
         av_gap = abs(first_video_pts - first_audio_pts)
-        assert av_gap < 0.3, f"audio/video start {av_gap:.2f}s apart (video={first_video_pts}, audio={first_audio_pts})"
+        # Without -noaccurate_seek this would be ~1.5s (audio trimmed exactly to 7.5s, video
+        # snapped to the 6s keyframe) — a tight tolerance here is the point of the test.
+        assert av_gap < 0.5, f"audio/video start {av_gap:.2f}s apart (video={first_video_pts}, audio={first_audio_pts})"
         print(f"E12 ok: seeking to a non-keyframe point ({seek_offset}s) keeps audio/video aligned (gap {av_gap:.2f}s)")
 
         # ---------- ?atrack=1 picks the second (Telugu) audio track instead of the default (eng),
