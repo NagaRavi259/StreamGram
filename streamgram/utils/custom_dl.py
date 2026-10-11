@@ -2,6 +2,13 @@ import math
 import asyncio
 import logging
 logger = logging.getLogger("streamgram.utils.custom_dl")
+# Concurrent in-flight GetFile calls yield_file() keeps ahead of the part being consumed.
+# Derived from production logs of streaming a very large file: Telegram's media DC periodically
+# answers at ~0.15 MB/s against the ~0.39 MB/s a video needs in real time (a 2.6x gap) -- fetching
+# one part at a time pays that slowdown with nothing overlapping to hide it. 3x clears the gap
+# with margin while keeping early-abandonment waste small and not bursting hard enough to look
+# like abuse to Telegram's own throttling.
+PREFETCH_WINDOW = 3
 from streamgram.vars import Var
 from typing import Dict, Union
 from streamgram.bot import work_loads
@@ -190,30 +197,57 @@ class ByteStreamer:
         Custom generator that yields the bytes of the media file.
         `offset` is chunk-aligned; the first part is trimmed by `first_part_cut` and the
         last part is trimmed to `last_part_cut` bytes, so exactly the requested range is sent.
+        Keeps up to PREFETCH_WINDOW GetFile calls in flight on the same media session ahead of
+        the part currently being consumed, so a slow reply from Telegram doesn't block everything
+        behind it -- parts are always yielded strictly in order regardless of which one comes back
+        first. Stopping early (a probe that only wants the first part or two, a client disconnect)
+        only ever leaves at most PREFETCH_WINDOW already-in-flight calls to cancel, never the rest
+        of a large range.
         Modded from <https://github.com/eyaadh/megadlbot_oss/blob/master/mega/telegram/utils/custom_download.py#L20>
         Thanks to Eyaadh <https://github.com/eyaadh>
         """
         client = self.client
         work_loads[index] += 1
         current_part = 0
+        pending: Dict[int, asyncio.Task] = {}
         logger.debug(f"Starting to yielding file with client {index}.")
         try:
             media_session = await self.generate_media_session(client, file_id)
             location = await self.get_location(file_id)
 
-            for current_part in range(1, part_count + 1):
-                r = await media_session.send(
-                    raw.functions.upload.GetFile(location=location, offset=offset, limit=chunk_size),
+            def submit(part_number):
+                part_offset = offset + (part_number - 1) * chunk_size
+                pending[part_number] = asyncio.create_task(
+                    media_session.send(
+                        raw.functions.upload.GetFile(location=location, offset=part_offset, limit=chunk_size),
+                    )
                 )
+
+            for part_number in range(1, min(PREFETCH_WINDOW, part_count) + 1):
+                submit(part_number)
+
+            for current_part in range(1, part_count + 1):
+                r = await pending.pop(current_part)
+
+                next_part = current_part + PREFETCH_WINDOW
+                if next_part <= part_count:
+                    submit(next_part)
+
                 if not isinstance(r, raw.types.upload.File) or not r.bytes:
                     break
                 start = first_part_cut if current_part == 1 else 0
                 end = last_part_cut if current_part == part_count else len(r.bytes)
                 yield r.bytes[start:end]
-                offset += chunk_size
         except (TimeoutError, AttributeError) as e:
             logger.warning(f"Stream interrupted at part {current_part}/{part_count}: {e!r}")
         finally:
+            for task in pending.values():
+                task.cancel()
+            for task in pending.values():
+                try:
+                    await task
+                except (asyncio.CancelledError, Exception):
+                    pass
             logger.debug(f"Finished yielding file with {current_part} parts.")
             work_loads[index] -= 1
 

@@ -59,6 +59,62 @@ async def main():
     assert work_loads[0] == 0
     print(f"H1 ok: {len(cases)} ranges byte-exact, work_loads balanced")
 
+    # ---------- H1b: yield_file actually pipelines requests, not just one-at-a-time
+    random.seed(2)
+    blob2 = bytes(random.getrandbits(8) for _ in range(10_000_000))
+    class ConcurrencySess:
+        def __init__(self):
+            self.inflight = 0
+            self.peak = 0
+        async def send(self, req):
+            self.inflight += 1
+            self.peak = max(self.peak, self.inflight)
+            await asyncio.sleep(0.02)  # forces real overlap to be observable, not just submitted-in-order luck
+            self.inflight -= 1
+            return raw.types.upload.File(type=None, mtime=0, bytes=blob2[req.offset:req.offset + req.limit])
+    sess2 = ConcurrencySess()
+    async def gms2(c, f): return sess2
+    bs2 = object.__new__(ByteStreamer); bs2.client = None  # own instance -- must not disturb bs/gms for later sections
+    bs2.generate_media_session = gms2
+    work_loads[0] = 0
+    a, b = 0, len(blob2) - 1
+    cs2 = await chunk_size(b - a + 1); off2 = await offset_fix(a, cs2)
+    parts2 = b // cs2 - off2 // cs2 + 1
+    out2 = b"".join([c async for c in bs2.yield_file(None, 0, off2, a - off2, b % cs2 + 1, parts2, cs2)])
+    assert out2 == blob2, "H1b: pipelined output must still be byte-exact"
+    assert 1 < sess2.peak <= custom_dl.PREFETCH_WINDOW, f"H1b: expected real overlap, peak={sess2.peak}"
+    assert work_loads[0] == 0
+    print(f"H1b ok: pipelined fetch byte-exact, peak concurrency {sess2.peak} (window={custom_dl.PREFETCH_WINDOW})")
+
+    # ---------- H1c: yield_file cleans up and stops fetching when the consumer walks away early
+    class LoggingSess:
+        def __init__(self):
+            self.calls = []
+        async def send(self, req):
+            self.calls.append(req.offset)
+            await asyncio.sleep(0.02)
+            return raw.types.upload.File(type=None, mtime=0, bytes=blob2[req.offset:req.offset + req.limit])
+    sess3 = LoggingSess()
+    async def gms3(c, f): return sess3
+    bs2.generate_media_session = gms3
+    work_loads[0] = 0
+    captured = []
+    old_handler = LOOP.get_exception_handler()
+    LOOP.set_exception_handler(lambda loop, ctx: captured.append(ctx))
+    try:
+        gen = bs2.yield_file(None, 0, off2, a - off2, b % cs2 + 1, parts2, cs2)
+        await gen.__anext__()
+        await gen.__anext__()
+        calls_before_close = len(sess3.calls)
+        await gen.aclose()
+        await asyncio.sleep(0.05)
+    finally:
+        LOOP.set_exception_handler(old_handler)
+    assert captured == [], f"H1c: unhandled exception/warning after aclose: {captured}"
+    assert len(sess3.calls) == calls_before_close, "H1c: should not keep fetching after the consumer walked away"
+    assert work_loads[0] == 0
+    print(f"H1c ok: early-abandonment cleanup is silent and stops fetching ({calls_before_close} calls made)")
+
     # ---------- H2: parse_range
     pr = sr.parse_range
     assert pr(None, 100) is None and pr("garbage", 100) is None and pr("bytes=-", 100) is None
