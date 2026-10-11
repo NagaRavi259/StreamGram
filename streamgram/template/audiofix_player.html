@@ -187,6 +187,40 @@
                 '&atrack=' + encodeURIComponent(currentTrackIndex);
         }
 
+        // On a freshly (re)loaded source the delivery rate is bursty -- fast for a moment, then
+        // well below real-time for several seconds, then fast again. Steady playback never notices
+        // this because minutes of buffer have already piled up; resuming the instant 'canplay'
+        // fires has no cushion at all ('canplay' just means "a moment of data", not "enough to
+        // keep up"), so the very next slow patch stalls playback right after a seek. This waits for
+        // a few real seconds of lead before resuming -- costs nothing on a fast connection, since
+        // that fills near-instantly, but gives a slow one something to draw down from instead of
+        // stalling immediately.
+        var RESUME_BUFFER_SECONDS = 3, RESUME_BUFFER_TIMEOUT_MS = 5000;
+
+        function waitForBuffer(minSeconds, timeoutMs, done) {
+            var timer = null;
+            function bufferedAhead() {
+                var ranges = video.buffered;
+                for (var i = 0; i < ranges.length; i++) {
+                    if (ranges.start(i) <= video.currentTime && ranges.end(i) - video.currentTime >= minSeconds) {
+                        return true;
+                    }
+                }
+                return false;
+            }
+            function finish() {
+                video.removeEventListener('progress', check);
+                clearTimeout(timer);
+                done();
+            }
+            function check() { if (bufferedAhead()) finish(); }
+            video.addEventListener('progress', check);
+            // Don't wait forever: a short remaining tail can never reach minSeconds of buffer, and
+            // a genuinely stalled source should still attempt playback instead of hanging silently.
+            timer = setTimeout(finish, timeoutMs);
+            check();
+        }
+
         function loadAt(offsetSeconds, autoplay) {
             baseOffset = Math.max(0, Math.min(offsetSeconds, Math.max(0, totalDuration - 1)));
             videoBox.classList.add('loading');
@@ -196,7 +230,9 @@
             if (autoplay) {
                 video.addEventListener('canplay', function onReady() {
                     video.removeEventListener('canplay', onReady);
-                    video.play().catch(function () {});
+                    waitForBuffer(RESUME_BUFFER_SECONDS, RESUME_BUFFER_TIMEOUT_MS, function () {
+                        video.play().catch(function () {});
+                    });
                 }, { once: true });
             }
         }
