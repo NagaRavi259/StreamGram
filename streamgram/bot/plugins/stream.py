@@ -126,7 +126,12 @@ async def private_receive_handler(c: Client, m: Message):
         # re-encoded to AAC) version of the same file can be compared side by side.
         stream_link_audiofix = f"{stream_link}&audiofix=1"
 
-        online_link = f"{Var.URL}{str(log_msg.id)}/?hash={token}"
+        # &audiofix=0: Download must always give the exact original file (attachment,
+        # untouched bytes), never the auto-transcoded/inline-only audio-fix response --
+        # that response hardcodes Content-Disposition: inline, which made Download silently
+        # open a browser video tab instead of saving a file for any video whose audio codec
+        # needed fixing. The Watch links above are unaffected and keep auto-detecting.
+        online_link = f"{Var.URL}{str(log_msg.id)}/?hash={token}&audiofix=0"
 
         photo_xr="https://telegra.ph/file/3cd15a67ad7234c2945e7.jpg"
 
@@ -205,7 +210,9 @@ async def channel_receive_handler(bot, broadcast):
                     broadcast.chat.id, sponsor, log_msg.id)
         stream_link = f"{Var.URL}watch/{str(log_msg.id)}/{quote_plus(get_name(log_msg))}?hash={token}"
         stream_link_audiofix = f"{stream_link}&audiofix=1"
-        online_link = f"{Var.URL}{str(log_msg.id)}/{quote_plus(get_name(log_msg))}?hash={token}"
+        # &audiofix=0: see the private_receive_handler comment above -- Download must always
+        # be the untouched original file, never the inline-only auto-transcoded response.
+        online_link = f"{Var.URL}{str(log_msg.id)}/{quote_plus(get_name(log_msg))}?hash={token}&audiofix=0"
         await log_msg.reply_text(
             text=f"**Cʜᴀɴɴᴇʟ Nᴀᴍᴇ:** `{broadcast.chat.title}`\n**Cʜᴀɴɴᴇʟ ID:** `{broadcast.chat.id}`\n**Rᴇǫᴜᴇsᴛ ᴜʀʟ:** {stream_link}",
             quote=True

@@ -268,6 +268,15 @@ async def main():
     assert issued and f"?hash={issued}" in sent_text and legacy_hash not in sent_text
     print("private_receive_handler ok: new links carry the issued token, not the old hash (C2)")
 
+    # The Download link must always force audiofix off (&audiofix=0), so it serves the exact
+    # original file (Content-Disposition: attachment) and never the auto-transcoded, inline-
+    # only response -- previously, any video whose audio codec needed fixing made "Download"
+    # silently open a browser player instead of saving a file, since that response hardcodes
+    # inline disposition regardless of which link (Watch or Download) actually requested it.
+    assert f"?hash={issued}&audiofix=0" in sent_text
+    assert f"watch/903/?hash={issued}&audiofix=0" not in sent_text  # only the download link, not watch
+    print("private_receive_handler ok: Download link forces audiofix off (F14)")
+
     # ================= admin menu: screens not covered elsewhere =================
     from streamgram.bot.plugins import access_admin as aa
 
