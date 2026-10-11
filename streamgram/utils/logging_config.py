@@ -3,7 +3,10 @@
 Two files, both size-limited and rotated, so logs cannot grow without bound:
   <dir>/info.log   everything below WARNING that passes the configured level (INFO, and DEBUG if enabled)
   <dir>/error.log  WARNING, ERROR and CRITICAL
-Errors are also copied to stderr so a process manager shows crashes without opening the files.
+stderr (what `pm2 logs` / `docker logs` / a plain terminal show) mirrors the same configured
+level -- if LOG_LEVEL=DEBUG, debug lines show up live on the console, not just in info.log.
+Previously the console was hard-capped at ERROR regardless of LOG_LEVEL, so setting LOG_LEVEL=DEBUG
+to watch something live produced no visible output at all; the detail was only ever in the files.
 The level comes from LOG_LEVEL (default INFO); noisy libraries are held at LOG_LIBS_LEVEL (default WARNING).
 """
 import logging
@@ -42,7 +45,7 @@ def setup_logging(level="INFO", log_dir="logs", max_bytes=5 * 1024 * 1024, backu
     error_handler.setLevel(max(level_no, logging.WARNING))
 
     console = logging.StreamHandler(sys.stderr)
-    console.setLevel(max(level_no, logging.ERROR))
+    console.setLevel(level_no)
 
     for handler in (info_handler, error_handler, console):
         handler.setFormatter(formatter)

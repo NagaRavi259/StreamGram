@@ -311,7 +311,18 @@
             loadAt(resumeAt, wasPlaying);
         });
 
+        function isFullscreen() {
+            return !!(document.fullscreenElement || document.webkitFullscreenElement);
+        }
+
         fsBtn.addEventListener('click', function () {
+            if (isFullscreen()) {
+                // Was previously missing entirely: the button only ever called
+                // requestFullscreen(), so a second click while already fullscreen did nothing.
+                if (document.exitFullscreen) document.exitFullscreen();
+                else if (document.webkitExitFullscreen) document.webkitExitFullscreen();
+                return;
+            }
             // Fullscreen the whole shell (video + controls), not just the bare <video> --
             // fullscreening the video alone leaves the custom controls bar, language picker
             // included, behind on the page and falls back to the browser's own native
@@ -319,6 +330,22 @@
             if (playerShell.requestFullscreen) playerShell.requestFullscreen();
             else if (playerShell.webkitRequestFullscreen) playerShell.webkitRequestFullscreen();
         });
+
+        // On a phone, rotate to landscape automatically on fullscreen (and release the lock on
+        // exit, however it happens -- the button, Escape, or the browser's own UI) -- only
+        // Android Chrome-family browsers support locking orientation at all (notably not iOS
+        // Safari), and only while fullscreen is active, so this is a no-op everywhere else
+        // rather than an error: feature-detected and wrapped, never blocks fullscreen itself.
+        function onFullscreenChange() {
+            if (!screen.orientation || !screen.orientation.lock) return;
+            if (isFullscreen()) {
+                screen.orientation.lock('landscape').catch(function () {});
+            } else if (screen.orientation.unlock) {
+                try { screen.orientation.unlock(); } catch (e) {}
+            }
+        }
+        document.addEventListener('fullscreenchange', onFullscreenChange);
+        document.addEventListener('webkitfullscreenchange', onFullscreenChange);
 
         retryBtn.addEventListener('click', function () {
             loadAt(baseOffset, true);

@@ -211,6 +211,29 @@ async def main():
         setup_logging("DEBUG", d2, 100000, 2, "WARNING")
         logging.getLogger("streamgram.test").debug("now-debug"); logging.getLogger("pyrogram").debug("lib-debug"); flush()
         assert "now-debug" in read(f"{d2}/info.log") and "lib-debug" not in read(f"{d2}/info.log")
+
+        # The console (stderr -- what `pm2 logs`/`docker logs`/a plain terminal show) must track
+        # LOG_LEVEL, not be hard-capped at ERROR: setting LOG_LEVEL=DEBUG to watch something live
+        # previously produced no console output at all, only ever landing in info.log.
+        import io
+        real_stderr = sys.stderr
+        try:
+            sys.stderr = io.StringIO()
+            setup_logging("DEBUG", tempfile.mkdtemp(), 100000, 2, "WARNING")
+            logging.getLogger("streamgram.test").debug("console-debug-visible")
+            flush()
+            assert "console-debug-visible" in sys.stderr.getvalue()
+
+            sys.stderr = io.StringIO()
+            setup_logging("INFO", tempfile.mkdtemp(), 100000, 2, "WARNING")
+            logging.getLogger("streamgram.test").debug("console-debug-hidden")
+            logging.getLogger("streamgram.test").info("console-info-visible")
+            flush()
+            console_at_info = sys.stderr.getvalue()
+            assert "console-debug-hidden" not in console_at_info and "console-info-visible" in console_at_info
+        finally:
+            sys.stderr = real_stderr
+        print("logging ok: console mirrors LOG_LEVEL instead of being capped at ERROR")
         d3 = tempfile.mkdtemp()
         setup_logging("ERROR", d3, 100000, 2, "WARNING")
         logging.getLogger("streamgram.test").warning("hidden"); logging.getLogger("streamgram.test").error("shown"); flush()
