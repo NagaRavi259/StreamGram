@@ -1,4 +1,4 @@
-# File-To-Link Bot — Progress & Checklist
+# StreamGram — Progress & Checklist
 
 Living document. Update the checkboxes and the "Log" section as work happens.
 Last updated: 2026-10-03 (initial version, derived from git history, working tree and a full code read — see `01-architecture-and-flow.md`).

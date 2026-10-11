@@ -1,4 +1,4 @@
-# File-To-Link Bot — Architecture & Flow
+# StreamGram — Architecture & Flow
 
 > Snapshot of the code as of commit `94a2e47` ("code refactor"), written 2026-10-03.
 > Origin: fork of `adarsh-goel/filestreambot-pro` / `Aadhi000/File-To-Link`; package name is `streamgram`.

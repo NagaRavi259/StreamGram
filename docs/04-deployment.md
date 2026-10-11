@@ -14,16 +14,16 @@ app, creates `logs/`, and runs `python -m streamgram` on port 8080. It does **no
 time.
 
 ```bash
-docker build -t file-to-link .
+docker build -t streamgram .
 
 docker run -d \
-  --name file-to-link \
+  --name streamgram \
   --restart unless-stopped \
   -p 8080:8080 \
   --env-file config.env \
-  -v file-to-link-logs:/app/logs \
-  -v file-to-link-sessions:/app/sessions \
-  file-to-link
+  -v streamgram-logs:/app/logs \
+  -v streamgram-sessions:/app/sessions \
+  streamgram
 ```
 
 Notes:
@@ -34,7 +34,7 @@ Notes:
   scoped to `/app/sessions` specifically (not the whole `/app`) so that rebuilding the image
   with code changes still takes effect on the next `docker run` — a volume covering the whole
   app directory would freeze it at whatever was there when the volume was first created.
-- `docker logs file-to-link` shows the startup banner; `logs/info.log` and `logs/error.log`
+- `docker logs streamgram` shows the startup banner; `logs/info.log` and `logs/error.log`
   live in the mounted `logs` volume (see `docs/01-architecture-and-flow.md` §15).
 
 To update: rebuild the image and `docker stop/rm` + re-`run`.
@@ -76,17 +76,17 @@ repo) keep the bot running and restart it on crash or reboot.
 ### B1: systemd
 
 ```ini
-# /etc/systemd/system/file-to-link.service
+# /etc/systemd/system/streamgram.service
 [Unit]
-Description=File-To-Link Telegram bot
+Description=StreamGram Telegram bot
 After=network.target
 
 [Service]
 Type=simple
 User=botuser
-WorkingDirectory=/opt/file-to-link
-EnvironmentFile=/opt/file-to-link/config.env
-ExecStart=/opt/file-to-link/venv/bin/python -m streamgram
+WorkingDirectory=/opt/streamgram
+EnvironmentFile=/opt/streamgram/config.env
+ExecStart=/opt/streamgram/venv/bin/python -m streamgram
 Restart=on-failure
 RestartSec=5
 
@@ -96,14 +96,14 @@ WantedBy=multi-user.target
 
 Setup:
 ```bash
-cd /opt/file-to-link
+cd /opt/streamgram
 python3 -m venv venv
 venv/bin/pip install -r requirements.txt
 cp config.env.example config.env   # then fill it in
 sudo systemctl daemon-reload
-sudo systemctl enable --now file-to-link
-sudo systemctl status file-to-link
-journalctl -u file-to-link -f      # follow logs (the app's own logs/ still apply too)
+sudo systemctl enable --now streamgram
+sudo systemctl status streamgram
+journalctl -u streamgram -f      # follow logs (the app's own logs/ still apply too)
 ```
 
 ### B2: PM2
@@ -111,7 +111,7 @@ journalctl -u file-to-link -f      # follow logs (the app's own logs/ still appl
 `process.json` is already in the repo root and just runs `python3 start_bot.py`:
 
 ```bash
-cd /opt/file-to-link
+cd /opt/streamgram
 python3 -m venv venv  # optional; or install deps globally
 venv/bin/pip install -r requirements.txt  # if using a venv, also set "interpreter" in
                                            # process.json to venv/bin/python3
@@ -119,11 +119,11 @@ cp config.env.example config.env          # then fill it in
 pm2 start process.json
 pm2 save                                   # persist across reboots
 pm2 startup                                # generates the OS boot hook (follow its printed command)
-pm2 logs File-To-Link_Bot
+pm2 logs StreamGram
 ```
 
 To update: `git pull`, `venv/bin/pip install -r requirements.txt` if dependencies changed,
-then `pm2 restart File-To-Link_Bot` (or `sudo systemctl restart file-to-link` for systemd).
+then `pm2 restart StreamGram` (or `sudo systemctl restart streamgram` for systemd).
 
 ---
 
