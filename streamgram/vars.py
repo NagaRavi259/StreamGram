@@ -27,17 +27,30 @@ def _env_text(name):
     return None if value.lower() in ("", "none") else value
 
 
+def _env_int(name, default):
+    """default when unset or blank (e.g. `VAR=` in config.env), otherwise int(value).
+
+    getenv(name, default) alone only substitutes the default when the variable is
+    completely absent -- an env var present but set to an empty string (exactly what
+    config.env.example's own convention produces for an unused optional variable) still
+    comes back as '', and int('') raises ValueError. Confirmed live via docker compose:
+    config.env's documented `USER_GROUP_ID=` crashed startup before this helper existed.
+    """
+    value = getenv(name)
+    return default if value is None or not value.strip() else int(value)
+
+
 class Var(object):
     MULTI_CLIENT = False
     API_ID = int(getenv('API_ID'))
     API_HASH = str(getenv('API_HASH'))
     BOT_TOKEN = str(getenv('BOT_TOKEN'))
     name = str(getenv('SESSION_NAME', 'streamgram'))
-    SLEEP_THRESHOLD = int(getenv('SLEEP_THRESHOLD', '60'))
+    SLEEP_THRESHOLD = _env_int('SLEEP_THRESHOLD', 60)
     BIN_CHANNEL = int(getenv('BIN_CHANNEL'))
-    PORT = int(getenv('PORT', 8080))
+    PORT = _env_int('PORT', 8080)
     BIND_ADRESS = str(getenv('WEB_SERVER_BIND_ADDRESS', '0.0.0.0'))
-    PING_INTERVAL = int(environ.get("PING_INTERVAL", "1200"))  # 20 minutes
+    PING_INTERVAL = _env_int('PING_INTERVAL', 1200)  # 20 minutes
     OWNER_ID = set(int(x) for x in os.environ.get("OWNER_ID", "").replace(',', ' ').split())
     if not OWNER_ID:
         logger.warning("OWNER_ID is empty: nobody is exempt from access checks and admin commands are unreachable.")
@@ -57,7 +70,7 @@ class Var(object):
     else:
         URL = "http://{}/".format(FQDN)
     logger.debug("Public URL resolved to %s", URL)
-    WORKERS = int(getenv('WORKERS', 3))
+    WORKERS = _env_int('WORKERS', 3)
     MY_PASS = _env_text('MY_PASS')
     logger.info("Password login (/login) is %s", "ENABLED" if MY_PASS else "disabled (MY_PASS unset)")
 
@@ -74,7 +87,7 @@ class Var(object):
     BANNED_CHANNELS = list(set(int(x) for x in str(getenv("BANNED_CHANNELS", "-1001362659779")).split()))
     # ids separated by spaces and/or commas; blank or unset means nobody
     TRUSTED_USERS = set(int(u) for u in (getenv('TRUSTED_USERS') or '').replace(',', ' ').split())
-    USER_GROUP_ID = int(getenv('USER_GROUP_ID', 1))
+    USER_GROUP_ID = _env_int('USER_GROUP_ID', 1)
     if USER_GROUP_ID >= 0:
         logger.warning(
             "USER_GROUP_ID (%s) is not a negative chat id: no access group is configured, "
@@ -89,14 +102,14 @@ class Var(object):
     # re-encodes only the audio to AAC. Needs the ffmpeg/ffprobe binaries on PATH; silently stays
     # off (falls back to today's plain passthrough) if they're missing.
     ENABLE_AUDIO_FIX = _env_bool('ENABLE_AUDIO_FIX', True)
-    MAX_CONCURRENT_AUDIO_FIX = int(getenv('MAX_CONCURRENT_AUDIO_FIX', 2))
+    MAX_CONCURRENT_AUDIO_FIX = _env_int('MAX_CONCURRENT_AUDIO_FIX', 2)
 
     # logging (see streamgram/utils/logging_config.py)
     LOG_LEVEL = str(getenv('LOG_LEVEL', 'INFO'))            # DEBUG, INFO, WARNING, ERROR
     LOG_LIBS_LEVEL = str(getenv('LOG_LIBS_LEVEL', 'WARNING'))  # pyrogram, uvicorn, motor ...
     LOG_DIR = str(getenv('LOG_DIR', 'logs'))
-    LOG_MAX_MB = int(getenv('LOG_MAX_MB', 5))               # size of each log file before it rotates
-    LOG_BACKUPS = int(getenv('LOG_BACKUPS', 3))             # rotated copies kept per file
+    LOG_MAX_MB = _env_int('LOG_MAX_MB', 5)               # size of each log file before it rotates
+    LOG_BACKUPS = _env_int('LOG_BACKUPS', 3)             # rotated copies kept per file
     logger.debug(
         "Config loaded: name=%s PORT=%s BIND=%s ON_HEROKU=%s LOG_LEVEL=%s",
         name, PORT, BIND_ADRESS, ON_HEROKU, LOG_LEVEL,

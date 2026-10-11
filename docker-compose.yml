@@ -1,0 +1,40 @@
+services:
+  mongo:
+    image: mongo:7
+    restart: unless-stopped
+    volumes:
+      - mongo-data:/data/db
+    healthcheck:
+      test: ["CMD", "mongosh", "--quiet", "--eval", "db.adminCommand('ping')"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  bot:
+    build: .
+    restart: unless-stopped
+    depends_on:
+      mongo:
+        condition: service_healthy
+    env_file:
+      - config.env
+    environment:
+      # Point at the mongo service above regardless of what config.env says, so the same
+      # config.env also works unmodified outside compose (e.g. a bare `docker run`).
+      MONGO_HOST: mongo
+      MONGO_PORT: "27017"
+    ports:
+      - "${PORT:-8080}:8080"
+    volumes:
+      - bot-logs:/app/logs
+      # Pyrogram's *.session files live here (see streamgram/bot/__init__.py); persisting
+      # only this directory, not the whole app, means an image rebuild's code changes still
+      # take effect on the next `up` -- mounting the whole /app would freeze it at whatever
+      # was there when the volume was first created. Without this volume at all, every
+      # restart re-logs-in to Telegram.
+      - bot-sessions:/app/sessions
+
+volumes:
+  mongo-data:
+  bot-logs:
+  bot-sessions:

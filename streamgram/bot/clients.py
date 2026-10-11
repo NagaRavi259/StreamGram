@@ -6,7 +6,7 @@ logger = logging.getLogger("streamgram.bot.clients")
 from ..vars import Var
 from pyrogram import Client
 from streamgram.utils.config_parser import TokenParser
-from . import multi_clients, work_loads, StreamBot
+from . import multi_clients, work_loads, StreamBot, SESSIONS_DIR
 
 
 async def initialize_clients():
@@ -30,6 +30,7 @@ async def initialize_clients():
                 bot_token=token,
                 sleep_threshold=Var.SLEEP_THRESHOLD,
                 no_updates=True,
+                workdir=SESSIONS_DIR,
             ).start()
             work_loads[client_id] = 0
             logger.debug(f"Client {client_id} started successfully")

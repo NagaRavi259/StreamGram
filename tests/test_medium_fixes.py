@@ -276,6 +276,40 @@ async def main():
     assert parse("1  2,3 ") == "[1, 2, 3]" and parse("") == "[]" and parse(" 7 ") == "[7]"
     print("M11 ok: tolerant TRUSTED_USERS parsing")
 
+    # ---- blank optional numeric vars (e.g. `USER_GROUP_ID=` in config.env, exactly what
+    # config.env.example documents for an unused one) must fall back to the default rather
+    # than crash. Found live: int(getenv(name, default)) only substitutes the default when
+    # the variable is completely absent, not when it's present-but-empty; a real docker
+    # compose run with USER_GROUP_ID= crashed the whole process before this was fixed.
+    def user_group_id(value_or_none):
+        env = dict(os.environ)
+        if value_or_none is None:
+            env.pop("USER_GROUP_ID", None)
+        else:
+            env["USER_GROUP_ID"] = value_or_none
+        out = subprocess.run([sys.executable, "-c", "from streamgram.vars import Var; print(Var.USER_GROUP_ID)"],
+                             env=env, cwd=ROOT, capture_output=True, text=True)
+        assert out.returncode == 0, out.stderr[-300:]
+        return out.stdout.strip()
+    assert user_group_id(None) == "1" and user_group_id("") == "1" and user_group_id("-1005") == "-1005"
+    print("blank USER_GROUP_ID ok: falls back to the default instead of crashing")
+
+    # ---- get_mongo_uri() with no username/password (an authless local/dev Mongo, e.g. a
+    # plain `mongo` container) must omit the user:pass@ segment entirely, not embed empty
+    # credentials. Found live: embedding ":@" unconditionally produced "mongodb://:@host:port/",
+    # which pymongo rejects outright (InvalidURI: "The empty string is not valid username").
+    from streamgram.utils.database import get_mongo_uri
+    import streamgram.vars as vars_mod
+    saved = (vars_mod.Var.MONGO_USERNAME, vars_mod.Var.MONGO_PASSWORD)
+    try:
+        vars_mod.Var.MONGO_USERNAME, vars_mod.Var.MONGO_PASSWORD = "", ""
+        assert get_mongo_uri() == "mongodb://127.0.0.1:27017/"
+        vars_mod.Var.MONGO_USERNAME, vars_mod.Var.MONGO_PASSWORD = "u", "p"
+        assert get_mongo_uri() == "mongodb://u:p@127.0.0.1:27017/"
+    finally:
+        vars_mod.Var.MONGO_USERNAME, vars_mod.Var.MONGO_PASSWORD = saved
+    print("get_mongo_uri ok: no empty user:pass@ segment when credentials are blank")
+
 
 def test_medium_fixes():
     LOOP.run_until_complete(main())

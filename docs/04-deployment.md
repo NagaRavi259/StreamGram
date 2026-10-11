@@ -22,7 +22,7 @@ docker run -d \
   -p 8080:8080 \
   --env-file config.env \
   -v file-to-link-logs:/app/logs \
-  -v file-to-link-sessions:/app \
+  -v file-to-link-sessions:/app/sessions \
   file-to-link
 ```
 
@@ -30,15 +30,41 @@ Notes:
 - `--env-file config.env` passes every variable from `config.env.example` as real environment
   variables; `python-dotenv` only loads `config.env` as a fallback, so either form works.
 - The sessions volume keeps `*.session` files (the bot's Telegram login) across container
-  restarts — without it, every restart re-authenticates and may hit login rate limits.
+  restarts — without it, every restart re-authenticates and may hit login rate limits. It's
+  scoped to `/app/sessions` specifically (not the whole `/app`) so that rebuilding the image
+  with code changes still takes effect on the next `docker run` — a volume covering the whole
+  app directory would freeze it at whatever was there when the volume was first created.
 - `docker logs file-to-link` shows the startup banner; `logs/info.log` and `logs/error.log`
   live in the mounted `logs` volume (see `docs/01-architecture-and-flow.md` §15).
-- If MongoDB is also containerized, add it as a second service (e.g. `docker-compose`) and
-  point `MONGO_HOST` at its service name; this repo doesn't ship a compose file since the
-  Mongo instance is usually managed separately (Atlas, a shared VPS instance, etc.).
 
-To update: rebuild the image and `docker stop/rm` + re-`run` (or `docker compose up -d
---build` if you wrap this in a compose file).
+To update: rebuild the image and `docker stop/rm` + re-`run`.
+
+### A1: docker compose (bot + MongoDB together)
+
+`docker-compose.yml` at the repo root runs the bot alongside its own MongoDB container —
+useful for local development/testing, or a small deployment that doesn't already have Mongo
+elsewhere. It does **not** replace a managed/hosted Mongo (Atlas, a shared VPS instance) for a
+real deployment with other consumers of that data; use a bare `docker run` with
+`MONGO_SCHEMA=mongodb+srv` and the external host for that instead.
+
+```bash
+cp config.env.example config.env   # fill in API_ID/API_HASH/BOT_TOKEN/BIN_CHANNEL/OWNER_ID
+                                    # at minimum; leave MONGO_HOST as-is, compose overrides it
+docker compose up -d --build
+docker compose logs -f bot
+```
+
+Notes:
+- `MONGO_HOST`/`MONGO_PORT` are overridden to point at the `mongo` service regardless of
+  what `config.env` says, so the same file still works unmodified with a bare `docker run`
+  against an external Mongo.
+- Mongo's data lives in the `mongo-data` named volume, persisted across restarts; the bot's
+  logs and `*.session` files are in `bot-logs` / `bot-sessions` the same way as Option A.
+- `PORT` in `config.env` controls the host-side port too (`${PORT:-8080}:8080`); defaults to
+  8080 if unset.
+- `docker compose down` stops both containers and keeps the volumes; add `-v` to also wipe
+  Mongo's data and the bot's session (next start re-logs-in to Telegram).
+- To update: `docker compose up -d --build` again (only rebuilds what changed).
 
 ---
 

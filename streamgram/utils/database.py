@@ -25,10 +25,16 @@ def get_client():
 def get_mongo_uri() -> str:
     """Builds and returns the MongoDB connection URI from environment variables."""
     # Never log the full URI: it embeds MONGO_USERNAME/MONGO_PASSWORD.
+    # The user:pass@ segment is only included when a username is actually set -- an
+    # authless local/dev Mongo (MONGO_USERNAME/PASSWORD both blank, e.g. a plain `mongo`
+    # container with no auth configured) would otherwise produce "mongodb://:@host:port/",
+    # which pymongo correctly rejects as InvalidURI ("The empty string is not valid
+    # username"). Confirmed live via docker compose against an unauthenticated mongo:7.
+    auth = f"{Var.MONGO_USERNAME}:{Var.MONGO_PASSWORD}@" if Var.MONGO_USERNAME else ""
     if Var.MONGO_SCHEMA == "mongodb+srv":
-        uri = f"{Var.MONGO_SCHEMA}://{Var.MONGO_USERNAME}:{Var.MONGO_PASSWORD}@{Var.MONGO_HOST}/?retryWrites=true&w=majority&tls=true"
+        uri = f"{Var.MONGO_SCHEMA}://{auth}{Var.MONGO_HOST}/?retryWrites=true&w=majority&tls=true"
     else:
-        uri = f"{Var.MONGO_SCHEMA}://{Var.MONGO_USERNAME}:{Var.MONGO_PASSWORD}@{Var.MONGO_HOST}:{Var.MONGO_PORT}/"
+        uri = f"{Var.MONGO_SCHEMA}://{auth}{Var.MONGO_HOST}:{Var.MONGO_PORT}/"
     logger.debug("Built Mongo URI (schema=%s, host=%s, credentials redacted)", Var.MONGO_SCHEMA, Var.MONGO_HOST)
     return uri
 
