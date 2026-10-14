@@ -1,5 +1,12 @@
 # MKV multi-audio + subtitles in the browser — planning + prototype build
 
+> **Superseded.** The hand-rolled prototype in `webplayer/` this doc describes (§8) has been
+> deleted. It was WebM/Opus-only and never handled this project's real H.264+EAC3-in-MKV case —
+> the `mediabunny` option floated in §4.4/§6 as an alternative to hand-rolling turned out to be the
+> right call: the live player now uses ArtPlayer + `artplayer-proxy-mediabunny`, which decodes
+> AC3/E-AC3/DTS via WebCodecs directly, closing exactly the gap this prototype left open. Kept as
+> historical record of the options considered.
+
 > **2026-10-05 update:** hard constraint — no server-side encode/decode. All demuxing/decoding
 > must happen client-side. Options A/B/C below (server-side ffmpeg) are kept for reference but
 > are **superseded by Option D** (§4.4) given this constraint. Read §4.4 first.

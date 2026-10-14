@@ -168,7 +168,7 @@ async def main():
     async def gfi2(client, chat, id): return render_template_vid
     render_template.get_file_ids = gfi2
     page = await render_template.render_page(7, "abcdef")
-    assert "<script>alert(1)" not in page and "<video" in page
+    assert "<script>alert(1)" not in page and 'id="artplayer-app"' in page
     async def gfi3(client, chat, id): return types.SimpleNamespace(unique_id="abcdef999", file_name=None, mime_type=None, file_size=None)
     render_template.get_file_ids = gfi3
     await render_template.render_page(7, "abcdef")   # None mime/name/size must not crash

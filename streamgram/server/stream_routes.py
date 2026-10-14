@@ -21,7 +21,6 @@ from streamgram.vars import Var
 from streamgram.utils.access import access_db
 from streamgram.utils.link_expiry import link_expiry
 from streamgram.utils.link_security import link_tokens
-from streamgram.utils import audio_fix
 from datetime import datetime
 
 router = APIRouter()
@@ -102,7 +101,7 @@ async def watch_handler(request: Request, path: str):
         id, secure_hash = parse_path(request, path)
         if not secure_hash:
             raise InvalidHash
-        return HTMLResponse(content=await render_page(id, secure_hash, request.query_params.get("audiofix")))
+        return HTMLResponse(content=await render_page(id, secure_hash))
     except HTTPException:
         raise
     except InvalidHash as e:
@@ -165,62 +164,6 @@ async def media_streamer(request: Request, id: int, secure_hash: str):
         raise InvalidHash
     if await link_expiry.is_expired(id):
         raise LinkExpired
-
-    # The audio-fix pass (streamgram/utils/audio_fix.py) reads this same endpoint via ffprobe/ffmpeg
-    # over loopback to do its work; that self-call carries this header so it never recurses into
-    # itself. A real browser/viewer request never sends it.
-    is_internal_call = request.headers.get(audio_fix.INTERNAL_HEADER_NAME) == "1"
-    # ?audiofix=1/true/on forces the transcode path on, ?audiofix=0/false/off forces it off,
-    # regardless of auto-detection — the two comparison links the bot sends use these explicitly
-    # so a viewer (or we, debugging) can tell "the original" and "the fixed" apart deterministically.
-    force_audio_fix = audio_fix.parse_audiofix_override(request.query_params.get("audiofix"))
-    # ?start=<seconds>: seeking with no disk cache means a seek just restarts the transcode from
-    # the new point (streamgram/template/audiofix_player.html drives this); meaningless outside the
-    # fix path, since plain passthrough already seeks natively via real byte ranges.
-    try:
-        start_seconds = max(0.0, float(request.query_params.get("start") or 0))
-    except ValueError:
-        start_seconds = 0.0
-    # ?atrack=<N>: an explicit audio-track pick from the language selector on the seek-capable
-    # player — always routes through the fixed pipeline for that track (see get_audio_fix_plan).
-    try:
-        atrack_raw = request.query_params.get("atrack")
-        audio_track_override = int(atrack_raw) if atrack_raw is not None else None
-    except ValueError:
-        audio_track_override = None
-    is_video_kind = (file_id.mime_type or "").split("/")[0] == "video"
-    if not is_internal_call and is_video_kind and (
-        audio_track_override is not None or force_audio_fix is not None or Var.ENABLE_AUDIO_FIX
-    ):
-        plan = await audio_fix.get_audio_fix_plan(
-            id, secure_hash, force=force_audio_fix, audio_track_index=audio_track_override
-        )
-        if plan["needs_fix"]:
-            try:
-                audio_fix.begin_transcode()
-            except audio_fix.TranscodeBusy:
-                logger.warning(
-                    "media_streamer(%s): audio-fix transcode slots full, falling back to plain "
-                    "passthrough (video only, no audio)", id,
-                )
-            else:
-                try:
-                    proc = await audio_fix.start_ffmpeg_transcode(
-                        id, secure_hash, plan["audio_track_index"], start_seconds=start_seconds
-                    )
-                except Exception:
-                    logger.exception("media_streamer(%s): failed to start ffmpeg, falling back to passthrough", id)
-                    audio_fix.end_transcode()
-                else:
-                    logger.info("media_streamer(%s): streaming with audio fixed (unsupported codec -> AAC)", id)
-                    body = audio_fix.stream_ffmpeg_output(proc, request, id)
-                    out_name = sanitize_header_value((file_id.file_name or "video").rsplit(".", 1)[0] + ".mp4")
-                    headers = {
-                        "Content-Type": "video/mp4",
-                        "Content-Disposition": f'inline; filename="{out_name}"',
-                        "Accept-Ranges": "none",
-                    }
-                    return StreamingResponse(body, status_code=200, headers=headers, media_type="video/mp4")
 
     file_size = file_id.file_size or 0
     byte_range = parse_range(range_header, file_size)

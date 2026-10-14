@@ -1,0 +1,337 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta http-equiv="X-UA-Compatible" content="IE=edge">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>%s</title>
+    <style>
+        :root { color-scheme: dark; }
+        * { box-sizing: border-box; }
+        body {
+            margin: 0; background: #0b0b0d; color: #eee;
+            font-family: -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif;
+        }
+        header {
+            padding: 10px 16px; background: #141417; font-weight: 600;
+            overflow: hidden; white-space: nowrap; text-overflow: ellipsis;
+        }
+        .player-wrap { max-width: 1100px; margin: 0 auto; padding: 12px; }
+        .video-box {
+            position: relative; background: #000; border-radius: 6px; overflow: hidden;
+            width: 100%%; aspect-ratio: 16 / 9; max-height: 80vh; margin: 0 auto;
+        }
+        #artplayer-app { width: 100%%; height: 100%%; }
+        #subtitle-overlay {
+            position: absolute; left: 0; right: 0; bottom: 60px; z-index: 30; padding: 0 5%%;
+            display: flex; justify-content: center; pointer-events: none;
+        }
+        #subtitle-text {
+            color: #fff; font-size: 20px; line-height: 1.4; white-space: pre-line; text-align: center;
+            text-shadow: 0 0 2px #000, 0 0 2px #000, 1px 1px 1px #000, -1px -1px 1px #000;
+        }
+        .error-banner {
+            display: none; background: #3a1414; border: 1px solid #7a2b2b; color: #ffdede;
+            padding: 10px 12px; border-radius: 6px; margin: 10px 6px 0; font-size: 13.5px;
+        }
+        .note {
+            font-size: 12.5px; color: #9a9a9a; padding: 10px 6px 0; line-height: 1.5;
+        }
+    </style>
+</head>
+<body>
+    <header>%s</header>
+    <div class="player-wrap">
+        <div class="video-box" id="video-box">
+            <div id="artplayer-app"></div>
+            <div id="subtitle-overlay"><span id="subtitle-text"></span></div>
+        </div>
+        <div class="error-banner" id="error-banner">
+            Playback couldn't start in this browser (it needs WebCodecs support, available in
+            current Chrome/Edge and recent Safari). Try an up-to-date Chrome or Edge.
+        </div>
+        <div class="note">
+            Audio, video and subtitle tracks are all decoded in your browser — nothing is
+            re-encoded on the server. Use the <b>Audio</b> / <b>CC</b> buttons to switch tracks,
+            and the settings gear for subtitle styling and a volume boost.
+        </div>
+    </div>
+
+    <script src="https://cdn.jsdelivr.net/npm/matroska-subtitles@3.3.2/dist/matroska-subtitles.min.js"></script>
+    <script type="module">
+    import Artplayer from 'https://cdn.jsdelivr.net/npm/artplayer@5.4.0/dist/artplayer.mjs';
+    import artplayerProxyMediabunny from 'https://cdn.jsdelivr.net/npm/artplayer-proxy-mediabunny@1.2.0/dist/artplayer-proxy-mediabunny.mjs';
+
+    const streamUrl = %s;
+    const videoBox = document.getElementById('video-box');
+    const errorBanner = document.getElementById('error-banner');
+    const subtitleTextEl = document.getElementById('subtitle-text');
+
+    // ---------- subtitle state (entirely separate from Mediabunny -- it has no subtitle-track
+    // API at all; matroska-subtitles walks the same raw MKV stream independently) ----------
+    //
+    // ArtPlayer's own subtitle component (art.subtitle) is NOT used here -- confirmed live that
+    // it depends on a real HTMLVideoElement + <track> (its .textTrack getter is a literal DOM
+    // TextTrack), which doesn't exist at all with the Mediabunny proxy (canvas-based, zero <video>
+    // elements in the DOM). art.subtitle.switch()/url/style() all silently no-op in this setup --
+    // confirmed by testing, not assumed. Cues are rendered with a plain absolutely-positioned div
+    // instead, driven by the same poll that watches for the runaway-clock issue below.
+    const subtitleTracksByNumber = {};   // number -> {name, lang, cues: [{text,time,duration}, ...]}
+    let currentSubtitleNumber = null;    // null = off
+    let subtitleDelaySeconds = 0;
+    let boostMultiplier = 1;
+    let audioTracksList = [];
+
+    function activeSubtitleText() {
+        if (currentSubtitleNumber === null) return '';
+        const track = subtitleTracksByNumber[currentSubtitleNumber];
+        if (!track) return '';
+        const nowMs = (art.currentTime - subtitleDelaySeconds) * 1000;
+        const hit = track.cues.find(function (c) { return nowMs >= c.time && nowMs < c.time + c.duration; });
+        return hit ? hit.text : '';
+    }
+
+    function selectSubtitleTrack(value) {
+        currentSubtitleNumber = value;
+        subtitleTextEl.textContent = value === null ? '' : activeSubtitleText();
+    }
+
+    function refreshSubsControl() {
+        const selector = [{ html: 'Off', value: null, default: currentSubtitleNumber === null }];
+        Object.keys(subtitleTracksByNumber).forEach(function (num) {
+            const t = subtitleTracksByNumber[num];
+            const label = (t.lang || 'und').toUpperCase() + (t.name ? ' — ' + t.name : '');
+            selector.push({ html: label, value: Number(num), default: Number(num) === currentSubtitleNumber });
+        });
+        art.controls.update({ name: 'gd-subs', selector: selector });
+    }
+
+    function startSubtitleFetch() {
+        if (!window.MatroskaSubtitles) { console.warn('matroska-subtitles did not load'); return; }
+        fetch(streamUrl).then(function (resp) {
+            if (!resp.ok || !resp.body) throw new Error('subtitle fetch failed: ' + resp.status);
+            const parser = new window.MatroskaSubtitles.SubtitleParser();
+            parser.on('tracks', function (tracks) {
+                tracks.forEach(function (t) {
+                    subtitleTracksByNumber[t.number] = { name: t.name, lang: t.language, cues: [] };
+                });
+                refreshSubsControl();
+            });
+            parser.on('subtitle', function (subtitle, trackNumber) {
+                const track = subtitleTracksByNumber[trackNumber];
+                if (!track) return;
+                track.cues.push(subtitle);
+            });
+            const reader = resp.body.getReader();
+            // Walks the whole stream sequentially (Matroska interleaves every track's data into
+            // each Cluster, so there's no way to fetch just the subtitle bytes) -- same bandwidth
+            // trade-off documented in docs/05-mkv-multiaudio-streaming.md for the demux step in
+            // general. Cheap relative to the video/audio Mediabunny itself fetches for playback,
+            // and runs fully in the background: tracks (and their cues so far) become selectable
+            // as soon as they're found, well before this finishes.
+            function pump() {
+                return reader.read().then(function (result) {
+                    if (result.done) return;
+                    parser.write(result.value);
+                    return pump();
+                });
+            }
+            return pump();
+        }).catch(function (e) {
+            console.warn('subtitle extraction unavailable:', e);
+        });
+    }
+
+    // ---------- audio-track discovery/switching ----------
+    // No published API for this on a plain (non-HLS) source in artplayer-proxy-mediabunny@1.2.0 --
+    // reaches into real, confirmed-working instance properties (read the actual source before
+    // relying on this): VideoShim exposes `engine` as a plain property, MediaBunnyEngine exposes
+    // `input`/`media` as plain properties and `replaceTracks()`/`setVolume()` as un-gated methods
+    // (the isHls gate only wraps the HLS-specific selectHlsAudio/selectHlsQuality helpers, not
+    // replaceTracks itself). Pin the exact proxy version above; a future release could rename
+    // these without a changelog note -- it would fail loudly (console error on track switch), not
+    // silently corrupt playback.
+    async function discoverAudioTracks() {
+        const engine = art.mediabunny && art.mediabunny.engine;
+        if (!engine || !engine.input) return;
+        const tracks = await engine.input.getAudioTracks();
+        audioTracksList = tracks;
+        const current = engine.media && engine.media.audioTrack;
+        const selector = [];
+        for (let i = 0; i < tracks.length; i++) {
+            const t = tracks[i];
+            const lang = (await t.getLanguageCode()) || 'und';
+            const name = (await t.getName()) || '';
+            selector.push({
+                html: lang.toUpperCase() + (name ? ' — ' + name : ''),
+                value: i,
+                default: t === current,
+            });
+        }
+        art.controls.update({ name: 'gd-audio', selector: selector });
+    }
+
+    async function switchAudioTrack(index) {
+        const engine = art.mediabunny && art.mediabunny.engine;
+        if (!engine || !engine.media) return;
+        const chosen = audioTracksList[index];
+        if (!chosen || chosen === engine.media.audioTrack) return;
+        const target = art.currentTime;
+        await engine.replaceTracks({
+            videoTrack: engine.media.videoTrack,
+            audioTrack: chosen,
+            videoMode: 'manual',
+            audioMode: 'manual',
+        });
+        // Defensive: replaceTracks() is documented to reseek back to the pre-switch position
+        // itself, but live testing found it can leave currentTime far past where it should be
+        // (observed: jumping to 40s+ on an 8s clip) when switching very close to the end of the
+        // track's content -- force it back to the known-good position rather than risk a runaway
+        // clock derailing playback and the progress bar.
+        const safeTarget = Number.isFinite(engine.duration) ? Math.min(target, engine.duration) : target;
+        if (!Number.isFinite(art.currentTime) || Math.abs(art.currentTime - safeTarget) > 2) {
+            await engine.seek(safeTarget);
+        }
+    }
+
+    function applyBoost() {
+        const engine = art.mediabunny && art.mediabunny.engine;
+        if (!engine) return;
+        engine.setVolume(art.volume * boostMultiplier, art.muted);
+    }
+
+    let art;
+    try {
+        art = new Artplayer({
+            container: '#artplayer-app',
+            url: streamUrl,
+            proxy: artplayerProxyMediabunny({}),
+            autoSize: false,
+            autoMini: false,
+            setting: true,
+            fullscreen: true,
+            fullscreenWeb: true,
+            hotkey: true,
+            gesture: true,
+            fastForward: true,
+            lock: true,
+            miniProgressBar: true,
+            theme: '#ff6b3d',
+            settings: [
+                {
+                    html: 'Volume boost', tooltip: '100%%',
+                    selector: [
+                        { html: '100%%', value: 1, default: true },
+                        { html: '125%%', value: 1.25 },
+                        { html: '150%%', value: 1.5 },
+                        { html: '200%%', value: 2 },
+                    ],
+                    onSelect: function (item) { boostMultiplier = item.value; applyBoost(); return item.html; },
+                },
+                {
+                    html: 'Subtitle size', tooltip: 'Normal',
+                    selector: [
+                        { html: 'Small', value: '16px' },
+                        { html: 'Normal', value: '20px', default: true },
+                        { html: 'Large', value: '28px' },
+                        { html: 'X-Large', value: '36px' },
+                    ],
+                    onSelect: function (item) { subtitleTextEl.style.fontSize = item.value; return item.html; },
+                },
+                {
+                    html: 'Subtitle font', tooltip: 'Default',
+                    selector: [
+                        { html: 'Default', value: '', default: true },
+                        { html: 'Serif', value: 'Georgia, serif' },
+                        { html: 'Monospace', value: '"Courier New", monospace' },
+                    ],
+                    onSelect: function (item) { subtitleTextEl.style.fontFamily = item.value || ''; return item.html; },
+                },
+                {
+                    html: 'Subtitle background', switch: false,
+                    onSwitch: function (item) {
+                        const next = !item.switch;
+                        subtitleTextEl.style.backgroundColor = next ? 'rgba(0,0,0,0.5)' : 'transparent';
+                        subtitleTextEl.style.padding = next ? '2px 8px' : '0';
+                        subtitleTextEl.style.borderRadius = next ? '4px' : '0';
+                        return next;
+                    },
+                },
+                {
+                    html: 'Subtitle delay', range: [0, -10, 10, 0.1],
+                    onRange: function (item) {
+                        subtitleDelaySeconds = item.range;
+                        return item.range.toFixed(1) + 's';
+                    },
+                },
+            ],
+            controls: [
+                {
+                    name: 'gd-audio', position: 'right', html: 'Audio', tooltip: 'Audio track',
+                    selector: [],
+                    onSelect: function (item) { switchAudioTrack(item.value); return item.html; },
+                },
+                {
+                    name: 'gd-subs', position: 'right', html: 'CC', tooltip: 'Subtitles',
+                    selector: [{ html: 'Off', value: null, default: true }],
+                    onSelect: function (item) { selectSubtitleTrack(item.value); return item.html; },
+                },
+            ],
+        });
+    } catch (e) {
+        console.error('Player init failed', e);
+        errorBanner.style.display = 'block';
+        throw e;
+    }
+
+    setInterval(function () {
+        // Subtitle cues: see the comment above activeSubtitleText() for why this is a poll
+        // against a plain overlay div rather than ArtPlayer's own (non-functional, in this
+        // canvas-proxy setup) subtitle component.
+        if (currentSubtitleNumber !== null) subtitleTextEl.textContent = activeSubtitleText();
+
+        // Safety net, not just a track-switch fix: live testing found that once playback reaches
+        // the real end of the content, the underlying engine's clock can keep ticking past
+        // `duration` indefinitely (observed climbing past 40s on an 8s clip) without ever firing a
+        // proper ended state, independent of whether any track was ever switched -- the kind of
+        // thing the proxy package's own changelog calls "audio pump starvation". `video:timeupdate`
+        // is NOT a safe hook for this: testing showed it stops firing in exactly this starved state
+        // (presumably tied to real decoded-frame progress, which has stalled) -- the one signal
+        // that's actually needed is the one that goes quiet. Polling independently of ArtPlayer's
+        // own events means detection doesn't depend on the broken component reporting its own
+        // breakage.
+        const d = art.duration;
+        if (Number.isFinite(d) && d > 0 && art.currentTime > d + 1 && !art.paused) {
+            art.pause();
+            art.currentTime = d;
+        }
+    }, 250);
+
+    art.on('video:loadedmetadata', function () {
+        discoverAudioTracks().catch(function (e) { console.warn('audio track discovery failed', e); });
+        applyBoost();
+    });
+    art.on('video:volumechange', applyBoost);
+    art.on('video:error', function () { errorBanner.style.display = 'block'; });
+
+    startSubtitleFetch();
+
+    // Mobile landscape lock on fullscreen -- not a stock ArtPlayer feature. Plain Fullscreen-API
+    // listener, independent of which library owns the fullscreened element, so it needs no
+    // changes from the old player's version of this same snippet.
+    function isFullscreen() {
+        return !!(document.fullscreenElement || document.webkitFullscreenElement);
+    }
+    function onFullscreenChange() {
+        if (!screen.orientation || !screen.orientation.lock) return;
+        if (isFullscreen()) {
+            screen.orientation.lock('landscape').catch(function () {});
+        } else if (screen.orientation.unlock) {
+            try { screen.orientation.unlock(); } catch (e) {}
+        }
+    }
+    document.addEventListener('fullscreenchange', onFullscreenChange);
+    document.addEventListener('webkitfullscreenchange', onFullscreenChange);
+    </script>
+</body>
+</html>

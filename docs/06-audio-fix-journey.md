@@ -1,5 +1,12 @@
 # The audio-fix feature: full timeline, dead ends, and how we actually got there
 
+> **Superseded.** The server-side ffmpeg pipeline this doc is about has been removed —
+> `streamgram/utils/audio_fix.py` is gone, replaced by a client-side player (ArtPlayer +
+> Mediabunny, decoding AC3/E-AC3/DTS via WebCodecs in the browser instead of transcoding on the
+> server). Kept as historical record: the debugging lessons below (the `-seekable 1` fix, the
+> fragmented-MP4-duration trap) are still worth knowing even though the mechanism they're about is
+> gone.
+
 Purpose of this doc: a resumable record. Read this before touching
 `streamgram/utils/audio_fix.py` again — several of the dead ends below look like
 reasonable things to try, and they were already tried and ruled out for

@@ -16,8 +16,9 @@ StreamGram forwards whatever you send it into a private Telegram "bin"
 channel, then serves the bytes back over plain HTTP with full `Range`
 support, so video/audio players can seek and downloads can resume. On top of
 that it adds access control, link security, automatic link expiry, and a
-fix for the one thing browsers still can't play natively — files whose audio
-track is AC3/E-AC3/DTS/TrueHD.
+browser-based player (ArtPlayer + Mediabunny) that decodes every track
+itself — including audio codecs like AC3/E-AC3/DTS that browsers can't
+play natively — with no server-side transcoding at all.
 
 ## Features
 
@@ -28,8 +29,10 @@ track is AC3/E-AC3/DTS/TrueHD.
 - Configurable link expiry (default unlimited, per-user override)
 - Per-link security tokens instead of a guessable hash
 - Optional password-only login path, independent of admin approval
-- Automatic audio fix for AC3/E-AC3/DTS/TrueHD tracks — re-encodes just the
-  audio to AAC on the fly, video is never touched
+- Client-side player (ArtPlayer + Mediabunny) that decodes any track in the
+  browser via WebCodecs — audio, video and subtitles, including codecs like
+  AC3/E-AC3/DTS that browsers can't play natively — with audio/subtitle-track
+  switching, subtitle styling and a volume boost, no server-side transcoding
 - Structured logging (rotating info/error logs, CSV request log)
 - Multi-bot load balancing (`MULTI_TOKEN_*`) to spread Telegram's flood
   limits across several bot accounts
@@ -107,11 +110,10 @@ git-ignored — never commit real values.
 </details>
 
 <details>
-  <summary><b>Audio fix, multi-bot, logging</b></summary>
+  <summary><b>Multi-bot, logging</b></summary>
 
 | Variable | Purpose |
 |---|---|
-| `ENABLE_AUDIO_FIX` / `MAX_CONCURRENT_AUDIO_FIX` | AC3/E-AC3/DTS/TrueHD → AAC fix; needs `ffmpeg`/`ffprobe` on `PATH` |
 | `MULTI_TOKEN_1`, `MULTI_TOKEN_2`, ... | Extra bot tokens to share the streaming load |
 | `LOG_LEVEL`, `LOG_DIR`, `LOG_MAX_MB`, `LOG_BACKUPS` | Logging verbosity, location and rotation |
 
@@ -134,4 +136,4 @@ automatically.
 Licensed under the [GNU AGPLv3](LICENSE). This project began from an
 AGPL-licensed open-source Telegram file-to-link bot and has since been
 substantially rewritten: access control, link security and expiry,
-structured logging, the audio fix, and more.
+structured logging, the client-side player, and more.
