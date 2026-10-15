@@ -67,6 +67,22 @@
     const errorBanner = document.getElementById('error-banner');
     const subtitleTextEl = document.getElementById('subtitle-text');
 
+    // WebCodecs (like several other powerful browser APIs) only exists in a secure context --
+    // https://, or localhost/127.0.0.1 as a browser-specific dev exception. On plain http:// to a
+    // real host, `VideoDecoder`/`AudioDecoder` are simply undefined: Mediabunny then has nothing
+    // to decode with, but doesn't surface a loud error either -- the page just sits there with the
+    // clock ticking and nothing ever rendering or playing, silently. That failure mode is
+    // confusing enough (confirmed live) that it's worth a specific message instead of the generic
+    // one below: this isn't a codec/browser-compatibility problem, it's the server needing HTTPS.
+    if (!window.isSecureContext || typeof VideoDecoder === 'undefined' || typeof AudioDecoder === 'undefined') {
+        errorBanner.textContent = 'This page needs to be served over HTTPS to play anything -- ' +
+            'the browser disables the decoding APIs this player relies on for any plain http:// ' +
+            'site. Nothing is wrong with this file or your browser; ask whoever runs this site to ' +
+            'add HTTPS.';
+        errorBanner.style.display = 'block';
+        throw new Error('Not a secure context: WebCodecs is unavailable, refusing to start the player.');
+    }
+
     // ---------- subtitle state (entirely separate from Mediabunny -- it has no subtitle-track
     // API at all; matroska-subtitles walks the same raw MKV stream independently) ----------
     //
