@@ -136,3 +136,38 @@ then `pm2 restart StreamGram` (or `sudo systemctl restart streamgram` for system
   `FQDN`/`HAS_SSL`.
 - First run creates `*.session` files next to the code; keep them (a volume, or just the
   VPS disk) so the bot doesn't need to log in to Telegram again on every restart.
+
+---
+
+## HTTPS for the streaming links
+
+The player decodes video/audio in the browser via WebCodecs, which browsers only expose on a
+secure context -- HTTPS, or the `localhost`/`127.0.0.1` loopback exception. A plain
+`http://your-ip/...` link loads the page, the stream downloads fine, but nothing ever decodes:
+no error, just a frozen frame with the timer running. So once `FQDN` is anything other than
+`localhost`/`127.0.0.1`, it needs to be served over HTTPS.
+
+Two ways to get there, same `HAS_SSL=true`/`FQDN` either way:
+
+- **You have a domain:** put a reverse proxy (nginx, Caddy, etc.) in front terminating TLS with
+  a real CA-signed certificate (e.g. via Let's Encrypt/certbot), proxying to `PORT` on
+  `127.0.0.1`. Leave `SSL_CERTFILE`/`SSL_KEYFILE` unset -- uvicorn keeps speaking plain HTTP
+  behind the proxy, same as today.
+- **You only have a bare IP:** there's no CA that will sign a certificate for an IP address
+  with no domain behind it, so run `scripts/generate_self_signed_cert.sh <your-ip>` and point
+  uvicorn at the result directly:
+  ```bash
+  scripts/generate_self_signed_cert.sh 203.0.113.10
+  ```
+  then in `config.env`:
+  ```
+  HAS_SSL=True
+  SSL_CERTFILE=certs/cert.pem
+  SSL_KEYFILE=certs/key.pem
+  PORT=443
+  ```
+  `PORT=443` needs root (or `setcap cap_net_bind_service`) -- fine for pm2/systemd running as
+  root, as this project's other docs already assume. Visitors get a one-time "not trusted"
+  browser warning to click through, since nothing signed the cert; that's the unavoidable
+  tradeoff of not owning a domain. If `SSL_CERTFILE`/`SSL_KEYFILE` are set but the files are
+  missing, the server logs a warning and falls back to plain HTTP rather than failing to start.

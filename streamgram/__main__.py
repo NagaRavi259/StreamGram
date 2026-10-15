@@ -65,10 +65,27 @@ async def start_services():
         asyncio.create_task(ping_server())
     print('-------------------- Initalizing Web Server -------------------------')
     # Use uvicorn to run FastAPI app
-    config = uvicorn.Config(app, host=Var.BIND_ADRESS, port=Var.PORT, log_level="error")
+    ssl_kwargs = {}
+    if Var.HAS_SSL and Var.SSL_CERTFILE and Var.SSL_KEYFILE:
+        if os.path.isfile(Var.SSL_CERTFILE) and os.path.isfile(Var.SSL_KEYFILE):
+            ssl_kwargs = {"ssl_certfile": Var.SSL_CERTFILE, "ssl_keyfile": Var.SSL_KEYFILE}
+            logger.info("TLS enabled: uvicorn will terminate HTTPS itself using %s", Var.SSL_CERTFILE)
+        else:
+            logger.warning(
+                "HAS_SSL is set and SSL_CERTFILE/SSL_KEYFILE are configured, but one of the files "
+                "doesn't exist (%s, %s) -- falling back to plain HTTP so the server still starts.",
+                Var.SSL_CERTFILE, Var.SSL_KEYFILE,
+            )
+    elif Var.HAS_SSL:
+        logger.warning(
+            "HAS_SSL is set but SSL_CERTFILE/SSL_KEYFILE aren't both configured, so uvicorn can't "
+            "terminate TLS itself. Either set both, or put a reverse proxy in front that terminates "
+            "TLS and leave HAS_SSL only controlling the public URL scheme."
+        )
+    config = uvicorn.Config(app, host=Var.BIND_ADRESS, port=Var.PORT, log_level="error", **ssl_kwargs)
     server = uvicorn.Server(config)
     asyncio.create_task(server.serve())
-    logger.info("Web server starting on %s:%s", Var.BIND_ADRESS, Var.PORT)
+    logger.info("Web server starting on %s%s:%s", "https://" if ssl_kwargs else "http://", Var.BIND_ADRESS, Var.PORT)
     print('----------------------------- DONE ---------------------------------------------------------------------')
     print('\n')
     print('----------------------- Service Started -----------------------------------------------------------------')

@@ -70,6 +70,11 @@ class Var(object):
     else:
         URL = "http://{}/".format(FQDN)
     logger.debug("Public URL resolved to %s", URL)
+    # When set, uvicorn terminates TLS itself using these (e.g. a self-signed cert for a bare IP,
+    # generated with scripts/generate_self_signed_cert.sh) instead of relying on a reverse proxy
+    # in front. Only takes effect when HAS_SSL is also true -- see __main__.py.
+    SSL_CERTFILE = _env_text('SSL_CERTFILE')
+    SSL_KEYFILE = _env_text('SSL_KEYFILE')
     WORKERS = _env_int('WORKERS', 3)
     MY_PASS = _env_text('MY_PASS')
     logger.info("Password login (/login) is %s", "ENABLED" if MY_PASS else "disabled (MY_PASS unset)")
