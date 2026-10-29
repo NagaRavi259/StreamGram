@@ -108,13 +108,15 @@ journalctl -u streamgram -f      # follow logs (the app's own logs/ still apply 
 
 ### B2: PM2
 
-`process.json` is already in the repo root and just runs `python3 start_bot.py`:
+`process.json` is already in the repo root and runs `venv/bin/python3 start_bot.py` --
+it expects a venv at `venv/` right in the repo root (relative to `process.json` itself, which
+pm2 resolves against the app's `cwd`). Installing globally instead, or naming the venv
+something else, means changing `"interpreter"` in `process.json` to match:
 
 ```bash
 cd /opt/streamgram
-python3 -m venv venv  # optional; or install deps globally
-venv/bin/pip install -r requirements.txt  # if using a venv, also set "interpreter" in
-                                           # process.json to venv/bin/python3
+python3 -m venv venv
+venv/bin/pip install -r requirements.txt
 cp config.env.example config.env          # then fill it in
 pm2 start process.json
 pm2 save                                   # persist across reboots
