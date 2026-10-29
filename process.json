@@ -4,7 +4,10 @@
       "name": "StreamGram",
       "script": "start_bot.py",
       "interpreter": "python3",
-      "exec_mode": "fork"
+      "exec_mode": "fork",
+      "min_uptime": "5m",
+      "max_restarts": 6,
+      "restart_delay": 5000
     }
   ]
 }

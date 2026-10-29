@@ -125,6 +125,38 @@ pm2 logs StreamGram
 To update: `git pull`, `venv/bin/pip install -r requirements.txt` if dependencies changed,
 then `pm2 restart StreamGram` (or `sudo systemctl restart streamgram` for systemd).
 
+`process.json`'s `min_uptime`/`max_restarts`/`restart_delay` are deliberately tuned, not
+defaults, and matter if you reuse this file as a template: if the bot genuinely can't reach
+Telegram, it now retries with backoff (10 attempts, capped exponential -- wzgram's
+Session.MAX_RETRIES) before giving up and exiting on purpose -- see `__main__.py`'s
+`start_or_die` -- instead of either spinning the CPU forever (the bug this replaced) or hanging
+silently. How long that takes isn't just the backoff sum (~151s): a real measurement against a
+genuinely unreachable address (`tests/test_wzgram_migration.py`'s W2, extrapolated to the real
+10-attempt default) took **242 seconds** (~4 minutes) end to end, because each of the 10
+attempts also pays for `Connection.connect()`'s own inner retry (3 sub-attempts, 1s apart) plus
+whatever the OS actually takes to fail a connection, on top of the backoff between attempts.
+`min_uptime: "5m"` is set with real margin above that measured figure, specifically so pm2
+counts "ran, retried for several minutes, then exited" as a real failed start, not a stable
+run; with pm2's default `min_uptime` (1s), it wouldn't count at all and pm2 would just keep
+restarting forever, slowly, never actually giving up. `max_restarts: 6` then caps that at
+roughly six tries (around half an hour total, including `restart_delay`) before pm2 stops
+auto-restarting and marks the app `errored` -- `pm2 list` / `pm2 info StreamGram` is the signal
+that it gave up and actually needs a person, rather than needing to notice a quiet "stopped"
+status with no indication of why. `test_wzgram_migration.py`'s W4 check guards the relationship
+between these two numbers (it fails if `min_uptime` ever drops below a computed theoretical
+floor), but it can't reproduce the *measured* 242s on every machine, so if you ever change
+`Session.MAX_RETRIES`-adjacent behavior, rerun W2 for real rather than trusting the formula.
+
+**Note:** these three settings only take effect when pm2 (re)reads `process.json` -- `pm2
+restart StreamGram` reruns the already-registered process as-is and will *not* pick up changes
+made here. After editing `process.json`, apply it with:
+
+```bash
+pm2 delete StreamGram
+pm2 start process.json
+pm2 save
+```
+
 ---
 
 ## Either way

@@ -10,7 +10,7 @@ from pyrogram import idle
 from .bot import StreamBot
 from .vars import Var
 from .utils.logging_config import setup_logging
-from .utils import pyrogram_reconnect_backoff
+from .utils.fatal_startup import start_or_die
 import uvicorn
 from .server import app  # Import FastAPI app instance
 from .utils.keepalive import ping_server
@@ -20,15 +20,11 @@ setup_logging(Var.LOG_LEVEL, Var.LOG_DIR, Var.LOG_MAX_MB * 1024 * 1024, Var.LOG_
 logger = logging.getLogger("streamgram")
 logger.info("Logging ready (level %s, files in %s/)", Var.LOG_LEVEL.upper(), Var.LOG_DIR)
 
-# Must run before StreamBot.start() (the very first Pyrogram session) -- see the module
-# docstring for the incident this fixes: an unbounded reconnect loop that pegged the CPU for
-# 28 minutes straight until the process had to be killed and restarted.
-pyrogram_reconnect_backoff.apply()
-
 ppath = "streamgram/bot/plugins/*.py"
 files = glob.glob(ppath)
 logger.debug("Found %d plugin file(s) under %s", len(files), ppath)
-StreamBot.start()
+
+start_or_die(StreamBot, logger)
 logger.info("StreamBot logged in to Telegram")
 loop = asyncio.get_event_loop()
 
