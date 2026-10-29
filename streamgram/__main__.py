@@ -10,6 +10,7 @@ from pyrogram import idle
 from .bot import StreamBot
 from .vars import Var
 from .utils.logging_config import setup_logging
+from .utils import pyrogram_reconnect_backoff
 import uvicorn
 from .server import app  # Import FastAPI app instance
 from .utils.keepalive import ping_server
@@ -18,6 +19,11 @@ from streamgram.bot.clients import initialize_clients
 setup_logging(Var.LOG_LEVEL, Var.LOG_DIR, Var.LOG_MAX_MB * 1024 * 1024, Var.LOG_BACKUPS, Var.LOG_LIBS_LEVEL)
 logger = logging.getLogger("streamgram")
 logger.info("Logging ready (level %s, files in %s/)", Var.LOG_LEVEL.upper(), Var.LOG_DIR)
+
+# Must run before StreamBot.start() (the very first Pyrogram session) -- see the module
+# docstring for the incident this fixes: an unbounded reconnect loop that pegged the CPU for
+# 28 minutes straight until the process had to be killed and restarted.
+pyrogram_reconnect_backoff.apply()
 
 ppath = "streamgram/bot/plugins/*.py"
 files = glob.glob(ppath)
