@@ -1,5 +1,13 @@
-Pyrogram==2.0.106
-tgcrypto<=1.2.3
+wzgram==3.1.6
+# wzgram is a drop-in Pyrogram fork (it ships files under both the `pyrogram` and `wzgram`
+# import names, so every `from pyrogram import ...` in this codebase keeps working unchanged)
+# that fixes a real production bug: stock Pyrogram's Session.start() retries a failed
+# connection with zero delay between attempts, which produced a confirmed 28-minute, 100%-CPU
+# reconnect storm (100,000+ attempts) on this project's own server before the process had to be
+# force-killed. wzgram bounds retries to Session.MAX_RETRIES (10) with capped exponential
+# backoff, raising instead of spinning forever once exhausted -- see __main__.py for what
+# happens to that raise. It also pulls in warpcrypto (Rust-based) as a hard dependency, in
+# place of the old optional tgcrypto package, so there's no more "TgCrypto is missing" warning.
 python-dotenv<=0.20.0
 motor
 aiofiles
