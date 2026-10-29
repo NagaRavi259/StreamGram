@@ -51,52 +51,103 @@
             current Chrome/Edge and recent Safari). Try an up-to-date Chrome or Edge.
         </div>
         <div class="note">
-            Audio, video and subtitle tracks are all decoded in your browser — nothing is
-            re-encoded on the server. Use the <b>Audio</b> / <b>CC</b> buttons to switch tracks,
-            and the settings gear for subtitle styling and a volume boost.
+            Audio is decoded and re-encoded, video is remuxed, and subtitles are parsed — all in
+            your browser; nothing touches the server. Use the <b>Audio</b> / <b>CC</b> buttons to
+            switch tracks, and the settings gear for subtitle styling and a volume boost.
         </div>
     </div>
 
     <script src="https://cdn.jsdelivr.net/npm/matroska-subtitles@3.3.2/dist/matroska-subtitles.min.js"></script>
     <script type="module">
     import Artplayer from 'https://cdn.jsdelivr.net/npm/artplayer@5.4.0/dist/artplayer.mjs';
-    import artplayerProxyMediabunny from 'https://cdn.jsdelivr.net/npm/artplayer-proxy-mediabunny@1.2.0/dist/artplayer-proxy-mediabunny.mjs';
+    import {
+        Input, UrlSource, ALL_FORMATS, Output, Mp4OutputFormat, NullTarget, Conversion, canEncodeAudio,
+    } from 'https://cdn.jsdelivr.net/npm/mediabunny@1.61.4/dist/bundles/mediabunny.min.mjs';
 
     const streamUrl = %s;
-    const videoBox = document.getElementById('video-box');
     const errorBanner = document.getElementById('error-banner');
     const subtitleTextEl = document.getElementById('subtitle-text');
+
+    function showError(message) {
+        errorBanner.textContent = message;
+        errorBanner.style.display = 'block';
+    }
+
+    // The @mediabunny/* extension packages below peer-depend on mediabunny and import it via the
+    // bare specifier 'mediabunny' internally (they don't bundle their own copy the way the old
+    // artplayer-proxy-mediabunny package did). A <script type="importmap"> mapping that bare
+    // specifier looks like the obvious fix and works when this file is served as a static file --
+    // but proved unreliable specifically through this project's real (uvicorn-based) server:
+    // reproduced even with a bare-minimum Starlette app, so it's not this project's code, it's a
+    // race between the browser's module preload scanner and import-map registration that only
+    // shows up when the HTML arrives in more than one chunk, which a plain synchronous
+    // http.server's single-write response never triggers. Sidestepped entirely here by fetching
+    // each extension's source ourselves and rewriting its one bare specifier to this exact URL
+    // string before the browser ever parses it as a module -- same URL string as the import above,
+    // so the module cache resolves both to the identical instance (codec registration is
+    // in-module state; a *different* instance of "mediabunny" would silently register nothing).
+    const MEDIABUNNY_URL = 'https://cdn.jsdelivr.net/npm/mediabunny@1.61.4/dist/bundles/mediabunny.min.mjs';
+    async function loadMediabunnyExtension(url) {
+        const source = await (await fetch(url)).text();
+        const rewritten = source.replaceAll('from"mediabunny"', 'from"' + MEDIABUNNY_URL + '"');
+        const blobUrl = URL.createObjectURL(new Blob([rewritten], { type: 'text/javascript' }));
+        try {
+            return await import(blobUrl);
+        } finally {
+            URL.revokeObjectURL(blobUrl);
+        }
+    }
+
+    try {
+        // Browsers' WebCodecs implementations have zero AC-3/E-AC-3/DTS support -- these are
+        // opt-in, separately-published decoder extensions (WASM builds of libavcodec's coders).
+        // Without this, Mediabunny's own documented behavior is to silently discard an audio track
+        // it can't decode and continue with video only -- exactly "video plays, no audio, no error
+        // anywhere", which is what shipped here before this was added. Must run before anything
+        // tries to decode.
+        const [ac3, dts, aacEncoder] = await Promise.all([
+            loadMediabunnyExtension('https://cdn.jsdelivr.net/npm/@mediabunny/ac3@1.61.4/dist/bundles/mediabunny-ac3.min.mjs'),
+            loadMediabunnyExtension('https://cdn.jsdelivr.net/npm/@mediabunny/dts@1.61.4/dist/bundles/mediabunny-dts.min.mjs'),
+            // AAC *encoding* (needed since we re-encode the chosen audio track for MSE) is
+            // natively supported by WebCodecs in some but not all browsers; only pull in the WASM
+            // fallback encoder when there's no native one, per Mediabunny's own documented pattern.
+            canEncodeAudio('aac').then(function (supported) {
+                return supported ? null : loadMediabunnyExtension('https://cdn.jsdelivr.net/npm/@mediabunny/aac-encoder@1.61.4/dist/bundles/mediabunny-aac-encoder.min.mjs');
+            }),
+        ]);
+        ac3.registerAc3Decoder();
+        dts.registerDtsDecoder();
+        if (aacEncoder) aacEncoder.registerAacEncoder();
+    } catch (e) {
+        showError('Playback failed to start: ' + (e && e.message ? e.message : e));
+        throw e;
+    }
 
     // WebCodecs (like several other powerful browser APIs) only exists in a secure context --
     // https://, or localhost/127.0.0.1 as a browser-specific dev exception. On plain http:// to a
     // real host, `VideoDecoder`/`AudioDecoder` are simply undefined: Mediabunny then has nothing
-    // to decode with, but doesn't surface a loud error either -- the page just sits there with the
-    // clock ticking and nothing ever rendering or playing, silently. That failure mode is
-    // confusing enough (confirmed live) that it's worth a specific message instead of the generic
-    // one below: this isn't a codec/browser-compatibility problem, it's the server needing HTTPS.
+    // to decode/encode audio with, but doesn't surface a loud error either. Confirmed live that
+    // this failure mode is confusing enough to need its own message instead of the generic one
+    // below: this isn't a codec/browser-compatibility problem, it's the server needing HTTPS.
     if (!window.isSecureContext || typeof VideoDecoder === 'undefined' || typeof AudioDecoder === 'undefined') {
-        errorBanner.textContent = 'This page needs to be served over HTTPS to play anything -- ' +
-            'the browser disables the decoding APIs this player relies on for any plain http:// ' +
-            'site. Nothing is wrong with this file or your browser; ask whoever runs this site to ' +
-            'add HTTPS.';
-        errorBanner.style.display = 'block';
+        showError(
+            'This page needs to be served over HTTPS to play anything -- the browser disables the ' +
+            'decoding APIs this player relies on for any plain http:// site. Nothing is wrong with ' +
+            'this file or your browser; ask whoever runs this site to add HTTPS.'
+        );
         throw new Error('Not a secure context: WebCodecs is unavailable, refusing to start the player.');
     }
 
-    // ---------- subtitle state (entirely separate from Mediabunny -- it has no subtitle-track
-    // API at all; matroska-subtitles walks the same raw MKV stream independently) ----------
+    // ---------- subtitle state (entirely separate from Mediabunny -- it has no subtitle-track API
+    // at all; matroska-subtitles walks the same raw MKV stream independently) ----------
     //
-    // ArtPlayer's own subtitle component (art.subtitle) is NOT used here -- confirmed live that
-    // it depends on a real HTMLVideoElement + <track> (its .textTrack getter is a literal DOM
-    // TextTrack), which doesn't exist at all with the Mediabunny proxy (canvas-based, zero <video>
-    // elements in the DOM). art.subtitle.switch()/url/style() all silently no-op in this setup --
-    // confirmed by testing, not assumed. Cues are rendered with a plain absolutely-positioned div
-    // instead, driven by the same poll that watches for the runaway-clock issue below.
+    // Rendered with a plain absolutely-positioned div rather than a native <track>/TextTrack: it
+    // needs no native video element to exist (this logic predates -- and doesn't care about -- the
+    // switch to a real <video> element below), and it's what the settings panel's subtitle
+    // size/font/background controls already style directly.
     const subtitleTracksByNumber = {};   // number -> {name, lang, cues: [{text,time,duration}, ...]}
     let currentSubtitleNumber = null;    // null = off
     let subtitleDelaySeconds = 0;
-    let boostMultiplier = 1;
-    let audioTracksList = [];
 
     function activeSubtitleText() {
         if (currentSubtitleNumber === null) return '';
@@ -158,70 +209,351 @@
         });
     }
 
-    // ---------- audio-track discovery/switching ----------
-    // No published API for this on a plain (non-HLS) source in artplayer-proxy-mediabunny@1.2.0 --
-    // reaches into real, confirmed-working instance properties (read the actual source before
-    // relying on this): VideoShim exposes `engine` as a plain property, MediaBunnyEngine exposes
-    // `input`/`media` as plain properties and `replaceTracks()`/`setVolume()` as un-gated methods
-    // (the isHls gate only wraps the HLS-specific selectHlsAudio/selectHlsQuality helpers, not
-    // replaceTracks itself). Pin the exact proxy version above; a future release could rename
-    // these without a changelog note -- it would fail loudly (console error on track switch), not
-    // silently corrupt playback.
+    // ---------- Mediabunny remux engine ----------
+    //
+    // Architecture confirmed by inspecting a real, working reference player live (not guessed):
+    // it feeds a genuine <video> element through MediaSource Extensions, not a canvas. H.264 video
+    // packets are copied into a fragmented MP4 container untouched (cheap -- no video decode at
+    // all); only the chosen audio track is decoded (via the registered AC-3/E-AC-3/DTS decoder)
+    // and re-encoded to AAC, since that's the one piece no browser can play natively regardless of
+    // container. This also means the real <video> element's native audio pipeline, volume,
+    // fullscreen, and PiP all just work, for free, exactly like any ordinary video.
+    //
+    // Mediabunny's own docs explicitly call out MediaSource as a supported use (its
+    // Output.getMimeType() method exists specifically to feed addSourceBuffer()), and its
+    // writing-media-files guide's own NullTarget example shows assembling ftyp+moov as an init
+    // segment and moof+mdat as each media segment -- the exact shape used below.
+    const LOOKAHEAD_SECONDS = 30;   // keep roughly this much buffered ahead of playback
+    const REFILL_CHUNK_SECONDS = 20; // extend the buffered horizon by this much each refill
+
+    let input = null;
+    let totalDuration = 0;
+    let currentAudioTrackNumber = null;
+    let session = null;             // the active RemuxSession
+    let suppressSeekRebuild = false;
+
+    function concatBytes(a, b) {
+        const out = new Uint8Array(a.length + b.length);
+        out.set(a, 0);
+        out.set(b, a.length);
+        return out;
+    }
+
+    function friendlyAudioLabel(lang, name, channels) {
+        const channelWord = channels === 1 ? 'Mono' : channels === 2 ? 'Stereo'
+            : channels === 6 ? '5.1' : channels === 8 ? '7.1' : (channels ? channels + 'ch' : '');
+        const bits = [lang.toUpperCase()];
+        if (name) bits.push(name);
+        if (channelWord) bits.push(channelWord);
+        return bits.join(' · ');
+    }
+
     async function discoverAudioTracks() {
-        const engine = art.mediabunny && art.mediabunny.engine;
-        if (!engine || !engine.input) return;
-        const tracks = await engine.input.getAudioTracks();
-        audioTracksList = tracks;
-        const current = engine.media && engine.media.audioTrack;
+        const tracks = await input.getAudioTracks();
         const selector = [];
         for (let i = 0; i < tracks.length; i++) {
             const t = tracks[i];
             const lang = (await t.getLanguageCode()) || 'und';
-            const name = (await t.getName()) || '';
+            const name = await t.getName();
+            const channels = await t.getNumberOfChannels();
             selector.push({
-                html: lang.toUpperCase() + (name ? ' — ' + name : ''),
-                value: i,
-                default: t === current,
+                html: friendlyAudioLabel(lang, name, channels),
+                value: t.number,
+                default: t.number === currentAudioTrackNumber,
             });
         }
         art.controls.update({ name: 'gd-audio', selector: selector });
     }
 
-    async function switchAudioTrack(index) {
-        const engine = art.mediabunny && art.mediabunny.engine;
-        if (!engine || !engine.media) return;
-        const chosen = audioTracksList[index];
-        if (!chosen || chosen === engine.media.audioTrack) return;
-        const target = art.currentTime;
-        await engine.replaceTracks({
-            videoTrack: engine.media.videoTrack,
-            audioTrack: chosen,
-            videoMode: 'manual',
-            audioMode: 'manual',
-        });
-        // Defensive: replaceTracks() is documented to reseek back to the pre-switch position
-        // itself, but live testing found it can leave currentTime far past where it should be
-        // (observed: jumping to 40s+ on an 8s clip) when switching very close to the end of the
-        // track's content -- force it back to the known-good position rather than risk a runaway
-        // clock derailing playback and the progress bar.
-        const safeTarget = Number.isFinite(engine.duration) ? Math.min(target, engine.duration) : target;
-        if (!Number.isFinite(art.currentTime) || Math.abs(art.currentTime - safeTarget) > 2) {
-            await engine.seek(safeTarget);
+    // One RemuxSession owns exactly one MediaSource + Conversion, covering the content from a
+    // given start time onward. Switching the audio track or seeking outside the buffered window
+    // both tear this down and build a fresh one at the target time, rather than trying to hot-swap
+    // a running SourceBuffer -- confirmed (by watching the reference player's video.src) that it
+    // does the same: a brand new blob: URL appears on every audio-track switch.
+    class RemuxSession {
+        constructor(startTime) {
+            this.startTime = startTime;
+            this.destroyed = false;
+            this.mediaSource = new MediaSource();
+            this.objectUrl = URL.createObjectURL(this.mediaSource);
+            this.sourceBuffer = null;
+            this.pendingSegments = [];
+            this.appending = false;
+            this.ftypBytes = null;
+            this.pendingMoof = null;
+            this.target = startTime + LOOKAHEAD_SECONDS;
+            this.conversion = null;
+        }
+
+        enqueueSegment(bytes) {
+            if (this.destroyed) return;
+            this.pendingSegments.push(bytes);
+            this.pump();
+        }
+
+        pump() {
+            if (this.destroyed || this.appending || !this.sourceBuffer || this.sourceBuffer.updating) return;
+            if (this.pendingSegments.length === 0) return;
+            this.appending = true;
+            const next = this.pendingSegments.shift();
+            try {
+                this.sourceBuffer.appendBuffer(next);
+            } catch (e) {
+                this.appending = false;
+                console.error('appendBuffer failed', e);
+            }
+        }
+
+        async start() {
+            const output = new Output({
+                format: new Mp4OutputFormat({
+                    fastStart: 'fragmented',
+                    onFtyp: function (data) { this.ftypBytes = data; }.bind(this),
+                    onMoov: function (data) { this.enqueueSegment(concatBytes(this.ftypBytes, data)); }.bind(this),
+                    onMoof: function (data) { this.pendingMoof = data; }.bind(this),
+                    onMdat: function (data) { this.enqueueSegment(concatBytes(this.pendingMoof, data)); }.bind(this),
+                }),
+                target: new NullTarget(),
+            });
+
+            const wantedAudioNumber = currentAudioTrackNumber;
+            this.conversion = await Conversion.init({
+                input: input,
+                output: output,
+                trim: { start: this.startTime },
+                audio: function (track) {
+                    return track.number === wantedAudioNumber ? { codec: 'aac' } : { discard: true };
+                },
+            });
+
+            if (!this.conversion.isValid) {
+                throw new Error('Nothing playable: ' + this.conversion.discardedTracks.map(function (d) {
+                    return d.reason;
+                }).join('; '));
+            }
+
+            if (this.mediaSource.readyState !== 'open') {
+                await new Promise(function (resolve) {
+                    this.mediaSource.addEventListener('sourceopen', resolve, { once: true });
+                }.bind(this));
+            }
+            if (this.destroyed) return;
+
+            // execute() produces output (and therefore fires the onFtyp/.../onMdat callbacks
+            // above) as it runs; don't await it here, only far enough to learn the MIME type.
+            if (totalDuration) this.target = Math.min(this.target, totalDuration);
+            this.conversion.execute({
+                until: totalDuration && this.target >= totalDuration ? undefined : this.target,
+            }).catch(function (e) {
+                if (!this.destroyed) console.error('conversion failed', e);
+            }.bind(this));
+
+            const mimeType = await output.getMimeType();
+            if (this.destroyed) return;
+            if (!MediaSource.isTypeSupported(mimeType)) {
+                throw new Error('Browser cannot play the produced format: ' + mimeType);
+            }
+            this.sourceBuffer = this.mediaSource.addSourceBuffer(mimeType);
+            // Confirmed by inspecting the actual fragment bytes: Conversion's trim.start rebases
+            // output to zero (a fragment trimmed to start at 3.1s in the source carries
+            // tfdt/baseMediaDecodeTime=0, not 3.1s), so without this, every non-zero rebuild
+            // places its data back at the start of the video's timeline instead of where it
+            // belongs -- which is what was producing a permanently empty `buffered` range on any
+            // audio-track switch or out-of-window seek (the one thing that differs from the
+            // working t=0 initial load, which needs no offset since 0 already means 0).
+            this.sourceBuffer.timestampOffset = this.startTime;
+            this.sourceBuffer.addEventListener('updateend', function () {
+                this.appending = false;
+                this.pump();
+            }.bind(this));
+            this.sourceBuffer.addEventListener('error', function () {
+                // Per spec, the SourceBuffer is removed from the MediaSource when this fires --
+                // a real, fatal problem, not something pump()/appendBuffer's own try/catch would
+                // ever see (appendBuffer() itself doesn't throw for this).
+                if (!this.destroyed && session === this) {
+                    showError('Playback failed: the browser rejected the decoded media data.');
+                }
+            }.bind(this));
+            if (totalDuration) {
+                try { this.mediaSource.duration = totalDuration; } catch (e) { /* ignore */ }
+            }
+            this.pump();
+        }
+
+        // Called periodically during playback to keep ~LOOKAHEAD_SECONDS buffered ahead, per the
+        // resumable-execute pattern Conversion.execute()'s own docs describe (suspends at `until`,
+        // resumes on the next call with a later one).
+        async maintainBuffer(currentTime) {
+            if (this.destroyed || !this.conversion || this.conversion.state !== 'idle') return;
+            if (this.target >= totalDuration) return; // already converting to the end
+            if (this.target - currentTime > LOOKAHEAD_SECONDS) return;
+            this.target = Math.min(this.target + REFILL_CHUNK_SECONDS, totalDuration);
+            try {
+                await this.conversion.execute({ until: this.target < totalDuration ? this.target : undefined });
+            } catch (e) {
+                if (!this.destroyed) console.error('conversion refill failed', e);
+            }
+        }
+
+        isBuffered(time) {
+            if (!this.sourceBuffer) return false;
+            const b = this.sourceBuffer.buffered;
+            for (let i = 0; i < b.length; i++) {
+                if (time >= b.start(i) - 0.5 && time <= b.end(i)) return true;
+            }
+            return false;
+        }
+
+        async destroy() {
+            this.destroyed = true;
+            if (this.conversion) {
+                try { await this.conversion.cancel(); } catch (e) { /* ignore */ }
+            }
+            URL.revokeObjectURL(this.objectUrl);
         }
     }
 
-    function applyBoost() {
-        const engine = art.mediabunny && art.mediabunny.engine;
-        if (!engine) return;
-        engine.setVolume(art.volume * boostMultiplier, art.muted);
+    function seekAndWaitForSeeked(video, time) {
+        return new Promise(function (resolve) {
+            function onSeeked() {
+                video.removeEventListener('seeked', onSeeked);
+                clearTimeout(timeoutId);
+                resolve();
+            }
+            video.addEventListener('seeked', onSeeked);
+            // Safety net: if 'seeked' never fires (e.g. nothing buffered yet at this exact
+            // position), don't hang rebuildAt -- and more importantly, don't leave
+            // suppressSeekRebuild stuck true, which would make every later real seek do nothing.
+            const timeoutId = setTimeout(onSeeked, 1500);
+            video.currentTime = time;
+        });
     }
 
+    async function rebuildAt(time) {
+        const previous = session;
+        const wasPlaying = previous ? !art.video.paused : false;
+        const next = new RemuxSession(Math.max(0, time));
+        session = next;
+        // Destroy the superseded session right away rather than after `next` finishes starting --
+        // with rapid-fire rebuilds (double-clicking a track, seeking twice quickly) the old
+        // approach could leave a mid-flight session owning neither "current" nor "cleaned up",
+        // since whichever call's start() loses the resolve race would skip its own cleanup step.
+        if (previous) previous.destroy().catch(function () {});
+        suppressSeekRebuild = true;
+        try {
+            art.video.src = next.objectUrl;
+            await next.start();
+            if (session !== next) return; // a still-newer rebuild took over while this one started
+            if (Math.abs(art.video.currentTime - next.startTime) > 1) {
+                // video.currentTime = ... dispatches 'seeking' asynchronously -- on a later tick
+                // than this assignment, not synchronously as part of it. Resetting
+                // suppressSeekRebuild in `finally` right after this line, before that event has
+                // actually fired, let it reach onSeeking() with the flag already back off, which
+                // treated this correction as a new user seek and rebuilt again at the same target,
+                // forever (confirmed live: an unbroken loop of rebuilds at an identical timestamp).
+                // Waiting for the real 'seeked' event closes that gap.
+                await seekAndWaitForSeeked(art.video, next.startTime);
+            }
+            // A fresh MediaSource always starts paused regardless of what the previous one was
+            // doing -- resume explicitly so switching tracks or seeking past the buffered window
+            // doesn't silently stop playback out from under the viewer.
+            if (wasPlaying) art.video.play().catch(function () {});
+        } catch (e) {
+            // destroy() above cancels the conversion, which makes an in-flight start() throw --
+            // only report an error if this attempt is still the current one, not one that was
+            // itself superseded and intentionally canceled.
+            if (session === next) {
+                console.error('playback setup failed', e);
+                showError('Playback failed to start: ' + (e && e.message ? e.message : e));
+            }
+        } finally {
+            suppressSeekRebuild = false;
+        }
+    }
+
+    function onSeeking() {
+        if (suppressSeekRebuild || !session) return;
+        const t = art.video.currentTime;
+        if (!session.isBuffered(t)) {
+            rebuildAt(t);
+        }
+    }
+
+    async function switchAudioTrack(trackNumber) {
+        if (trackNumber === currentAudioTrackNumber) return;
+        currentAudioTrackNumber = trackNumber;
+        const target = art.video.currentTime || 0;
+        await rebuildAt(target);
+        discoverAudioTracks().catch(function (e) { console.warn('audio track refresh failed', e); });
+    }
+
+    // ---------- volume boost ----------
+    //
+    // A real <video> element plays its decoded audio to the system output natively -- no Web Audio
+    // API needed for ordinary 0-100%% volume, which ArtPlayer's own volume control already handles
+    // via video.volume. The boost setting (>100%%) is the one thing that needs a gain stage, so the
+    // tap is created lazily, only the first time it's actually used, keeping plain playback free of
+    // any AudioContext/autoplay-gating concerns at all.
+    let boostMultiplier = 1;
+    let gainNode = null;
+
+    function ensureGainTap() {
+        if (gainNode) return gainNode;
+        const AudioContextCtor = window.AudioContext || window.webkitAudioContext;
+        const audioContext = new AudioContextCtor();
+        const source = audioContext.createMediaElementSource(art.video);
+        gainNode = audioContext.createGain();
+        source.connect(gainNode);
+        gainNode.connect(audioContext.destination);
+        if (audioContext.state === 'suspended') {
+            audioContext.resume().catch(function () {});
+        }
+        return gainNode;
+    }
+
+    function applyBoost() {
+        if (boostMultiplier === 1 && !gainNode) return; // never touched the tap, nothing to do
+        ensureGainTap().gain.value = boostMultiplier;
+    }
+
+    // ---------- player ----------
     let art;
     try {
         art = new Artplayer({
             container: '#artplayer-app',
             url: streamUrl,
-            proxy: artplayerProxyMediabunny({}),
+            type: 'streamgram',
+            customType: {
+                // ArtPlayer invokes this before `new Artplayer(...)` below has returned, so the
+                // outer `art` variable isn't assigned yet -- it passes the instance as this 3rd
+                // argument specifically so handlers aren't stuck relying on that assignment.
+                // Everything else in this file (rebuildAt, onSeeking, discoverAudioTracks, ...)
+                // keeps using the one outer `art` binding, so fulfill it immediately.
+                streamgram: async function (video, url, artInstance) {
+                    art = artInstance;
+
+                    input = new Input({ source: new UrlSource(url), formats: ALL_FORMATS });
+
+                    const videoTrack = await input.getPrimaryVideoTrack();
+                    const primaryAudio = await input.getPrimaryAudioTrack();
+                    if (!videoTrack && !primaryAudio) {
+                        throw new Error('No playable video or audio track found in this file.');
+                    }
+                    currentAudioTrackNumber = primaryAudio ? primaryAudio.number : null;
+
+                    const tracksForDuration = [videoTrack, primaryAudio].filter(Boolean);
+                    totalDuration = (await input.getDurationFromMetadata(tracksForDuration, { skipLiveWait: true }))
+                        ?? (await input.computeDuration(tracksForDuration, { skipLiveWait: true }));
+
+                    await discoverAudioTracks();
+                    await rebuildAt(0);
+
+                    video.addEventListener('seeking', onSeeking);
+                    video.addEventListener('timeupdate', function () {
+                        if (session) session.maintainBuffer(video.currentTime);
+                    });
+                },
+            },
             autoSize: false,
             autoMini: false,
             setting: true,
@@ -296,45 +628,21 @@
         });
     } catch (e) {
         console.error('Player init failed', e);
-        errorBanner.style.display = 'block';
+        showError('Playback failed to start: ' + (e && e.message ? e.message : e));
         throw e;
     }
 
     setInterval(function () {
-        // Subtitle cues: see the comment above activeSubtitleText() for why this is a poll
-        // against a plain overlay div rather than ArtPlayer's own (non-functional, in this
-        // canvas-proxy setup) subtitle component.
         if (currentSubtitleNumber !== null) subtitleTextEl.textContent = activeSubtitleText();
-
-        // Safety net, not just a track-switch fix: live testing found that once playback reaches
-        // the real end of the content, the underlying engine's clock can keep ticking past
-        // `duration` indefinitely (observed climbing past 40s on an 8s clip) without ever firing a
-        // proper ended state, independent of whether any track was ever switched -- the kind of
-        // thing the proxy package's own changelog calls "audio pump starvation". `video:timeupdate`
-        // is NOT a safe hook for this: testing showed it stops firing in exactly this starved state
-        // (presumably tied to real decoded-frame progress, which has stalled) -- the one signal
-        // that's actually needed is the one that goes quiet. Polling independently of ArtPlayer's
-        // own events means detection doesn't depend on the broken component reporting its own
-        // breakage.
-        const d = art.duration;
-        if (Number.isFinite(d) && d > 0 && art.currentTime > d + 1 && !art.paused) {
-            art.pause();
-            art.currentTime = d;
-        }
     }, 250);
 
-    art.on('video:loadedmetadata', function () {
-        discoverAudioTracks().catch(function (e) { console.warn('audio track discovery failed', e); });
-        applyBoost();
-    });
     art.on('video:volumechange', applyBoost);
     art.on('video:error', function () { errorBanner.style.display = 'block'; });
 
     startSubtitleFetch();
 
     // Mobile landscape lock on fullscreen -- not a stock ArtPlayer feature. Plain Fullscreen-API
-    // listener, independent of which library owns the fullscreened element, so it needs no
-    // changes from the old player's version of this same snippet.
+    // listener, independent of which library owns the fullscreened element.
     function isFullscreen() {
         return !!(document.fullscreenElement || document.webkitFullscreenElement);
     }
